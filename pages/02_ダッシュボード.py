@@ -14,6 +14,32 @@ from urllib.parse import urlencode
 from utils import compute_results, detect_quality_issues
 from standard_rate_core import DEFAULT_PARAMS, sanitize_params, compute_rates
 from components import render_stepper, render_sidebar_nav
+import os
+from typing import Dict
+
+from openai import OpenAI
+
+
+def _generate_dashboard_comment(df: pd.DataFrame, metrics: Dict[str, float]) -> str:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return "OpenAI APIキーが設定されていません。"
+    client = OpenAI(api_key=api_key)
+    sample = df.head(5).to_markdown(index=False)
+    prompt = (
+        "あなたは製造業向けの経営コンサルタントです。"
+        "以下のKPIとデータサンプルに基づいて、現在の状況を日本語で要約し、"
+        "改善への簡潔なコメントを述べてください。\n"
+        f"KPI: 達成率={metrics.get('ach_rate',0):.1f}%, "
+        f"必要賃率={metrics.get('req_rate',0):.3f}, "
+        f"損益分岐賃率={metrics.get('be_rate',0):.3f}\n"
+        f"データサンプル:\n{sample}"
+    )
+    try:
+        resp = client.responses.create(model="gpt-4o-mini", input=prompt)
+        return resp.output_text.strip()
+    except Exception as exc:
+        return f"AIコメント生成に失敗しました: {exc}"
 
 st.title("② ダッシュボード")
 render_sidebar_nav()
@@ -240,6 +266,15 @@ kpi_df = pd.DataFrame(kpi_data)
 kpi_df = kpi_df[kpi_df["scenario"].isin(selected_scenarios)]
 fig_kpi = px.bar(kpi_df, x="KPI", y="value", color="scenario", barmode="group", opacity=0.5)
 st.plotly_chart(fig_kpi, use_container_width=True)
+
+st.subheader("AIコメント")
+if st.button("AIコメント生成"):
+    with st.spinner("生成中..."):
+        st.session_state["dashboard_ai_comment"] = _generate_dashboard_comment(
+            df_view,
+            {"ach_rate": ach_rate, "req_rate": req_rate, "be_rate": be_rate},
+        )
+st.write(st.session_state.get("dashboard_ai_comment", ""))
 
 st.markdown("<div id='dq_errors'></div>", unsafe_allow_html=True)
 st.subheader("データ品質エラー一覧")

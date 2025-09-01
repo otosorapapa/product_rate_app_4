@@ -8,6 +8,25 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from components import render_stepper, render_sidebar_nav
+import os
+from openai import OpenAI
+
+
+def _explain_standard_rate(results: dict[str, float]) -> str:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return "OpenAI APIキーが設定されていません。"
+    client = OpenAI(api_key=api_key)
+    prompt = (
+        "以下の標準賃率計算結果を分かりやすく説明してください。"
+        "専門用語を避けて日本語で100字程度にまとめてください。\n"
+        + "\n".join(f"{k}: {v}" for k, v in results.items())
+    )
+    try:
+        resp = client.responses.create(model="gpt-4o-mini", input=prompt)
+        return resp.output_text.strip()
+    except Exception as exc:
+        return f"AI説明の生成に失敗しました: {exc}"
 
 from standard_rate_core import (
     DEFAULT_PARAMS,
@@ -103,6 +122,12 @@ c1.metric("損益分岐賃率（円/分）", f"{results['break_even_rate']:.3f}"
 c2.metric("必要賃率（円/分）", f"{results['required_rate']:.3f}")
 c3.metric("年間標準稼働時間（分）", f"{results['annual_minutes']:.0f}")
 c4.metric("正味直接工員数合計", f"{results['net_workers']:.2f}")
+
+st.subheader("AIによる説明")
+if st.button("結果をAIで説明"):
+    with st.spinner("生成中..."):
+        st.session_state["sr_ai_comment"] = _explain_standard_rate(results)
+st.write(st.session_state.get("sr_ai_comment", ""))
 
 _, wf_col = st.columns([3, 1])
 with wf_col:
