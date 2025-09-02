@@ -53,8 +53,8 @@ if "current_scenario" not in st.session_state:
 st.caption(f"適用中シナリオ: {st.session_state['current_scenario']}")
 
 c1, c2, c3 = st.columns(3)
-c1.metric("固定費計 (円/年)", f"{calc_params.get('fixed_total', 0):,.0f}")
-c2.metric("必要利益計 (円/年)", f"{calc_params.get('required_profit_total', 0):,.0f}")
+c1.metric("固定費計 (千円/年)", f"{calc_params.get('fixed_total', 0)/1000:,.0f}")
+c2.metric("必要利益計 (千円/年)", f"{calc_params.get('required_profit_total', 0)/1000:,.0f}")
 c3.metric("年間標準稼働分 (分/年)", f"{calc_params.get('annual_minutes', 0):,.0f}")
 
 st.divider()
