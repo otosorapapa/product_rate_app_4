@@ -5,20 +5,10 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 import streamlit as st
 import pandas as pd
 from utils import read_excel_safely, parse_hyochin, parse_products
-from components import (
-    inject_mckinsey_style,
-    render_page_header,
-    render_sidebar_nav,
-    render_stepper,
-)
+from components import render_stepper, render_sidebar_nav
 
-inject_mckinsey_style()
+st.title("① データ入力 & 取り込み")
 render_sidebar_nav()
-render_page_header(
-    "① データ入力 & 取り込み",
-    "Excel から標賃と製品データを取り込み、分析シナリオのベースラインを整えます。",
-    icon="📥",
-)
 render_stepper(1)
 
 default_path = "data/sample.xlsx"
