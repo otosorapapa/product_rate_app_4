@@ -350,3 +350,112 @@ def detect_quality_issues(df: pd.DataFrame) -> pd.DataFrame:
             )
 
     return pd.DataFrame(issues, columns=["product_no", "product_name", "type", "column"])
+
+
+def detect_anomalies(
+    df: pd.DataFrame,
+    metrics: Optional[List[str]] = None,
+    z_threshold: float = 3.5,
+) -> pd.DataFrame:
+    """Detect statistical outliers for the specified metrics.
+
+    The function uses the modified Z-score based on the median absolute
+    deviation (MAD) to robustly flag values that are far away from the
+    center of the distribution. IQR-based thresholds are also returned for
+    reference so that users can compare where the value sits versus the
+    typical range.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Product level dataset.
+    metrics : list[str] | None
+        Target metric column names. When ``None`` a sensible default set of
+        monetory/throughput metrics is used.
+    z_threshold : float
+        Absolute modified Z-score threshold.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``product_no``, ``product_name``, ``metric``, ``value``,
+        ``direction`` (high/low), ``severity`` (abs(modified z-score)),
+        ``median`` and ``iqr_bounds`` for context.
+    """
+
+    if metrics is None:
+        metrics = [
+            "va_per_min",
+            "minutes_per_unit",
+            "actual_unit_price",
+            "material_unit_cost",
+            "daily_qty",
+            "rate_gap_vs_required",
+        ]
+
+    anomalies: List[Dict[str, Any]] = []
+    for col in metrics:
+        if col not in df.columns:
+            continue
+
+        series = pd.to_numeric(df[col], errors="coerce")
+        clean = series.dropna()
+        if clean.empty:
+            continue
+
+        median = float(clean.median())
+        mad = float(np.median(np.abs(clean - median)))
+        if mad == 0 or np.isnan(mad):
+            std = float(clean.std(ddof=0))
+            if std == 0 or np.isnan(std):
+                continue
+            z_scores = (clean - median) / std
+        else:
+            z_scores = 0.6745 * (clean - median) / mad
+
+        mask = z_scores.abs() >= z_threshold
+        if not mask.any():
+            continue
+
+        q1 = float(clean.quantile(0.25))
+        q3 = float(clean.quantile(0.75))
+        iqr = q3 - q1
+        lower = q1 - 1.5 * iqr
+        upper = q3 + 1.5 * iqr
+
+        for idx, score in z_scores[mask].items():
+            row = df.loc[idx]
+            value = row.get(col)
+            anomalies.append(
+                {
+                    "product_no": row.get("product_no"),
+                    "product_name": row.get("product_name"),
+                    "metric": col,
+                    "value": float(value) if pd.notna(value) else np.nan,
+                    "direction": "high" if value >= median else "low",
+                    "severity": float(abs(score)),
+                    "median": median,
+                    "iqr_lower": float(lower),
+                    "iqr_upper": float(upper),
+                }
+            )
+
+    if not anomalies:
+        return pd.DataFrame(
+            columns=[
+                "product_no",
+                "product_name",
+                "metric",
+                "value",
+                "direction",
+                "severity",
+                "median",
+                "iqr_lower",
+                "iqr_upper",
+            ]
+        )
+
+    result = pd.DataFrame(anomalies)
+    result.sort_values("severity", ascending=False, inplace=True)
+    result.reset_index(drop=True, inplace=True)
+    return result
