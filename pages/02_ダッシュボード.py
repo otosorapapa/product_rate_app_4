@@ -13,12 +13,7 @@ from urllib.parse import urlencode
 
 from utils import compute_results, detect_quality_issues
 from standard_rate_core import DEFAULT_PARAMS, sanitize_params, compute_rates
-from components import (
-    inject_mckinsey_style,
-    render_page_header,
-    render_sidebar_nav,
-    render_stepper,
-)
+from components import render_stepper, render_sidebar_nav
 import os
 from typing import Dict
 
@@ -46,13 +41,8 @@ def _generate_dashboard_comment(df: pd.DataFrame, metrics: Dict[str, float]) -> 
     except Exception as exc:
         return f"AIコメント生成に失敗しました: {exc}"
 
-inject_mckinsey_style()
+st.title("② ダッシュボード")
 render_sidebar_nav()
-render_page_header(
-    "② ダッシュボード",
-    "KPI 達成状況や未達の要因を多角的に把握し、優先すべき SKU を明確にします。",
-    icon="📊",
-)
 render_stepper(4)
 scenario_name = st.session_state.get("current_scenario", "ベース")
 st.caption(f"適用中シナリオ: {scenario_name}")
