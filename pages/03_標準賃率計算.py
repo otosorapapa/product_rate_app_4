@@ -7,7 +7,12 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from components import render_stepper, render_sidebar_nav
+from components import (
+    inject_mckinsey_style,
+    render_page_header,
+    render_sidebar_nav,
+    render_stepper,
+)
 import os
 from openai import OpenAI
 
@@ -37,8 +42,13 @@ from standard_rate_core import (
     generate_pdf,
 )
 
-st.title("③ 標準賃率 計算/感度分析")
+inject_mckinsey_style()
 render_sidebar_nav()
+render_page_header(
+    "③ 標準賃率 計算/感度分析",
+    "コスト前提と操業条件を調整し、必要賃率への感度を数値・グラフで検証します。",
+    icon="🧮",
+)
 render_stepper(4)
 scenarios = st.session_state.setdefault("scenarios", {"ベース": st.session_state.get("sr_params", DEFAULT_PARAMS)})
 current = st.session_state.setdefault("current_scenario", "ベース")
