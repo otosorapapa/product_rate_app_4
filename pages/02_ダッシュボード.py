@@ -6,6 +6,9 @@ if str(BASE_DIR) not in sys.path:
     # instead of any similarly named third-party package that might exist.
     sys.path.insert(0, str(BASE_DIR))
 
+import calendar
+import html
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -19,7 +22,7 @@ from utils import compute_results, detect_quality_issues, detect_anomalies
 from standard_rate_core import DEFAULT_PARAMS, sanitize_params, compute_rates
 from components import render_stepper, render_sidebar_nav
 import os
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from openai import OpenAI
 
@@ -91,6 +94,251 @@ st.markdown(
         color: #2F6776;
         font-weight: 600;
     }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    """
+    <style>
+    .action-calendar {
+        background: #ffffff;
+        border-radius: 20px;
+        border: 1px solid #dde5ef;
+        box-shadow: 0 24px 48px rgba(31, 42, 68, 0.1);
+        padding: 1.2rem 1.4rem;
+        margin-bottom: 1.2rem;
+    }
+    .calendar-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 0.6rem;
+    }
+    .calendar-nav {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+        font-weight: 700;
+        color: #1f2a44;
+    }
+    .calendar-nav .nav-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        border-radius: 999px;
+        border: 1px solid #cfd8dc;
+        background: #f8fafc;
+        font-size: 0.75rem;
+        color: #48617a;
+    }
+    .calendar-title {
+        font-size: 1.05rem;
+    }
+    .calendar-view-switch {
+        display: flex;
+        gap: 0.4rem;
+    }
+    .calendar-view-switch .view-chip {
+        padding: 0.25rem 0.75rem;
+        border-radius: 999px;
+        background: #f1f5f9;
+        color: #607489;
+        font-weight: 600;
+        font-size: 0.75rem;
+    }
+    .calendar-view-switch .view-chip.active {
+        background: #2F6776;
+        color: #ffffff;
+    }
+    .calendar-weekdays {
+        display: grid;
+        grid-template-columns: repeat(7, minmax(0, 1fr));
+        gap: 0.6rem;
+        margin-bottom: 0.4rem;
+        font-size: 0.72rem;
+        color: #607489;
+        font-weight: 600;
+        text-transform: uppercase;
+    }
+    .calendar-weekdays > div {
+        text-align: center;
+        padding-bottom: 0.4rem;
+        border-bottom: 1px solid #e0e7f1;
+    }
+    .calendar-row {
+        display: grid;
+        grid-template-columns: repeat(7, minmax(0, 1fr));
+        gap: 0.6rem;
+        margin-bottom: 0.6rem;
+    }
+    .calendar-cell {
+        background: #f8fbff;
+        border-radius: 16px;
+        border: 1px solid #e6edf5;
+        min-height: 120px;
+        padding: 0.55rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+        position: relative;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+    }
+    .calendar-cell.weekend {
+        background: #f4f7fb;
+    }
+    .calendar-cell.empty {
+        border-style: dashed;
+        background: transparent;
+        box-shadow: none;
+    }
+    .calendar-cell .day-number {
+        font-weight: 700;
+        color: #2F6776;
+        font-size: 0.85rem;
+    }
+    .calendar-empty {
+        font-size: 0.7rem;
+        color: #94a3b8;
+        background: rgba(148, 163, 184, 0.1);
+        border-radius: 12px;
+        padding: 0.3rem 0.4rem;
+        text-align: center;
+    }
+    .calendar-event {
+        background: #ffffff;
+        border-radius: 12px;
+        border: 1px solid rgba(47, 103, 118, 0.18);
+        padding: 0.5rem 0.6rem;
+        box-shadow: 0 10px 20px rgba(31, 42, 68, 0.08);
+        position: relative;
+        overflow: hidden;
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+    .calendar-event::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 4px;
+        background: var(--accent, #2F6776);
+    }
+    .calendar-event:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 18px 32px rgba(31, 42, 68, 0.14);
+    }
+    .calendar-event.is-top {
+        border-color: var(--accent, #2F6776);
+        box-shadow: 0 18px 36px rgba(31, 42, 68, 0.18);
+    }
+    .event-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 0.4rem;
+    }
+    .event-name {
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+        font-weight: 700;
+        color: #1f2a44;
+        font-size: 0.8rem;
+    }
+    .event-name span:last-child {
+        display: inline-block;
+        max-width: 10rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .rank-badge {
+        background: var(--accent, #2F6776);
+        color: #ffffff;
+        font-size: 0.68rem;
+        padding: 0.05rem 0.45rem;
+        border-radius: 999px;
+        font-weight: 700;
+    }
+    .focus-chip {
+        font-size: 0.65rem;
+        font-weight: 700;
+        color: var(--accent, #2F6776);
+        border-radius: 999px;
+        border: 1px solid rgba(47, 103, 118, 0.2);
+        background: rgba(47, 103, 118, 0.08);
+        padding: 0.1rem 0.55rem;
+        white-space: nowrap;
+    }
+    .event-meta {
+        font-size: 0.72rem;
+        color: #51627a;
+    }
+    .event-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.25rem;
+    }
+    .event-tags .tag {
+        font-size: 0.66rem;
+        font-weight: 600;
+        padding: 0.15rem 0.5rem;
+        border-radius: 999px;
+        background: rgba(47, 103, 118, 0.08);
+        color: #2F6776;
+    }
+    .event-tags .tag.price {
+        background: rgba(86, 197, 165, 0.18);
+        color: #157a64;
+    }
+    .event-tags .tag.ct {
+        background: rgba(100, 161, 247, 0.18);
+        color: #1f5fab;
+    }
+    .event-tags .tag.material {
+        background: rgba(245, 138, 138, 0.18);
+        color: #b33434;
+    }
+    .event-tags .tag.monitor {
+        background: rgba(179, 157, 219, 0.18);
+        color: #6741a6;
+    }
+    .calendar-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.8rem;
+        margin-top: 0.8rem;
+        font-size: 0.7rem;
+        color: #4c6178;
+        font-weight: 600;
+    }
+    .calendar-legend .legend-item {
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+    }
+    .calendar-legend .legend-dot {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        display: inline-block;
+    }
+    .calendar-legend .legend-dot.price { background: #56C5A5; }
+    .calendar-legend .legend-dot.ct { background: #64A1F7; }
+    .calendar-legend .legend-dot.material { background: #F58A8A; }
+    .calendar-legend .legend-dot.monitor { background: #B39DDB; }
+    @media (max-width: 1024px) {
+        .calendar-row {
+            gap: 0.4rem;
+        }
+        .calendar-cell {
+            padding: 0.5rem;
+        }
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -218,6 +466,184 @@ def _generate_dashboard_comment(
         return resp.output_text.strip()
     except Exception as exc:
         return f"AIコメント生成に失敗しました: {exc}"
+
+
+_CALENDAR_WEEK_LABELS = ["月", "火", "水", "木", "金", "土", "日"]
+_CALENDAR_COLOR_MAP = {
+    "price": "#56C5A5",
+    "ct": "#64A1F7",
+    "material": "#F58A8A",
+    "monitor": "#B39DDB",
+}
+
+
+def _format_float(value: Any, decimals: int = 1) -> str:
+    try:
+        if value is None or pd.isna(value):
+            return "N/A"
+        return f"{float(value):.{decimals}f}"
+    except Exception:
+        return "N/A"
+
+
+def _truncate_label(label: Any, max_chars: int = 14) -> str:
+    if label is None or (isinstance(label, float) and pd.isna(label)):
+        return ""
+    text = str(label)
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1] + "…"
+
+
+def _is_positive(value: Any) -> bool:
+    try:
+        return value is not None and not pd.isna(value) and float(value) > 0
+    except Exception:
+        return False
+
+
+def _dominant_focus(event: Dict[str, Any]) -> tuple[str, str]:
+    candidates: List[tuple[str, float, str]] = []
+    if _is_positive(event.get("price_improve")):
+        candidates.append(
+            ("価格見直し", float(event["price_improve"]), _CALENDAR_COLOR_MAP["price"])
+        )
+    if _is_positive(event.get("ct_improve")):
+        candidates.append(("CT改善", float(event["ct_improve"]), _CALENDAR_COLOR_MAP["ct"]))
+    if _is_positive(event.get("material_improve")):
+        candidates.append(
+            ("材料見直し", float(event["material_improve"]), _CALENDAR_COLOR_MAP["material"])
+        )
+    if candidates:
+        name, _, color = max(candidates, key=lambda item: item[1])
+        return name, color
+    return "重点監視", _CALENDAR_COLOR_MAP["monitor"]
+
+
+def _build_event_tags(event: Dict[str, Any]) -> str:
+    tags: List[str] = []
+    if _is_positive(event.get("price_improve")):
+        tags.append(
+            f"<span class='tag price'>価格 +{float(event['price_improve']):.1f}</span>"
+        )
+    if _is_positive(event.get("ct_improve")):
+        tags.append(
+            f"<span class='tag ct'>CT -{float(event['ct_improve']):.2f}</span>"
+        )
+    if _is_positive(event.get("material_improve")):
+        tags.append(
+            f"<span class='tag material'>材料 -{float(event['material_improve']):.1f}</span>"
+        )
+    if not tags:
+        tags.append("<span class='tag monitor'>要注視</span>")
+    return "".join(tags)
+
+
+def _render_calendar_event(event: Dict[str, Any]) -> str:
+    focus_label, accent = _dominant_focus(event)
+    name = str(event.get("product_name") or "不明")
+    truncated = html.escape(_truncate_label(name, 16), quote=True)
+    tooltip = html.escape(name, quote=True)
+    gap_txt = _format_float(event.get("gap"), 2)
+    roi_txt = _format_float(event.get("roi_months"), 1)
+    tags_html = _build_event_tags(event)
+    rank = event.get("rank")
+    rank_html = ""
+    rank_value: Optional[int] = None
+    if isinstance(rank, (int, float)):
+        rank_value = int(rank)
+        rank_html = f"<span class='rank-badge'>#{rank_value}</span>"
+    classes = ["calendar-event"]
+    if rank_value is not None and rank_value <= 5:
+        classes.append("is-top")
+    focus_chip = f"<span class='focus-chip'>{focus_label}</span>" if focus_label else ""
+    name_block = f"<div class='event-name'>{rank_html}<span>{truncated}</span></div>"
+    header_block = (
+        "<div class='event-header'>"
+        f"{name_block}"
+        f"{focus_chip}"
+        "</div>"
+    )
+    return (
+        f"<div class='{' '.join(classes)}' style='--accent:{accent}' title='{tooltip}'>"
+        f"{header_block}"
+        f"<div class='event-meta'>ギャップ {gap_txt} / ROI {roi_txt}ヶ月</div>"
+        f"<div class='event-tags'>{tags_html}</div>"
+        "</div>"
+    )
+
+
+def _render_action_calendar(actions: pd.DataFrame) -> str:
+    if actions.empty:
+        return ""
+
+    today = pd.Timestamp.today()
+    cal = calendar.Calendar(firstweekday=0)
+    weeks = cal.monthdayscalendar(today.year, today.month)
+    if not weeks:
+        return ""
+
+    events_matrix: List[List[List[Dict[str, Any]]]] = [[[] for _ in range(7)] for _ in weeks]
+    valid_slots = [
+        (week_idx, day_idx)
+        for week_idx, week in enumerate(weeks)
+        for day_idx, day in enumerate(week)
+        if day != 0
+    ]
+    if not valid_slots:
+        return ""
+
+    records = actions.head(20).reset_index(drop=True).to_dict("records")
+    for idx, record in enumerate(records):
+        week_idx, day_idx = valid_slots[idx % len(valid_slots)]
+        record["rank"] = idx + 1
+        events_matrix[week_idx][day_idx].append(record)
+
+    header_labels = "".join(f"<div>{label}</div>" for label in _CALENDAR_WEEK_LABELS)
+    rows_html: List[str] = []
+    for week_idx, week in enumerate(weeks):
+        cells: List[str] = []
+        for day_idx, day in enumerate(week):
+            if day == 0:
+                cells.append("<div class='calendar-cell empty'></div>")
+                continue
+            day_events = events_matrix[week_idx][day_idx]
+            events_html = "".join(_render_calendar_event(evt) for evt in day_events)
+            if not events_html:
+                events_html = "<div class='calendar-empty'>未アサイン</div>"
+            weekend_class = " weekend" if day_idx >= 5 else ""
+            cells.append(
+                f"<div class='calendar-cell{weekend_class}'><div class='day-number'>{day}</div>{events_html}</div>"
+            )
+        rows_html.append(f"<div class='calendar-row'>{''.join(cells)}</div>")
+
+    header_html = (
+        "<div class='calendar-header'>"
+        "<div class='calendar-nav'>"
+        "<span class='nav-btn' aria-hidden='true'>◀</span>"
+        f"<span class='calendar-title'>{today.strftime('%Y年%m月')}</span>"
+        "<span class='nav-btn' aria-hidden='true'>▶</span>"
+        "</div>"
+        "<div class='calendar-view-switch'>"
+        "<span class='view-chip active'>マンスリー</span>"
+        "<span class='view-chip'>ウィークリー</span>"
+        "</div>"
+        "</div>"
+        f"<div class='calendar-weekdays'>{header_labels}</div>"
+    )
+
+    legend_html = (
+        "<div class='calendar-legend'>"
+        "<div class='legend-item'><span class='legend-dot price'></span>価格見直し</div>"
+        "<div class='legend-item'><span class='legend-dot ct'></span>CT改善</div>"
+        "<div class='legend-item'><span class='legend-dot material'></span>材料見直し</div>"
+        "<div class='legend-item'><span class='legend-dot monitor'></span>重点監視</div>"
+        "</div>"
+    )
+
+    body_html = "".join(rows_html)
+    return f"<div class='action-calendar'>{header_html}{body_html}{legend_html}</div>"
+
 
 st.title("② ダッシュボード")
 render_sidebar_nav()
@@ -450,7 +876,6 @@ gap_df["material_improve"] = (
 ).clip(lower=0)
 gap_df["roi_months"] = gap_df["price_improve"].replace({0: np.nan}) / gap_df["gap"].replace({0: np.nan})
 top_list = gap_df.sort_values("gap", ascending=False).head(20)
-top_cards = top_list.head(5)
 
 
 def _render_target_badge(col, text: str) -> None:
@@ -580,21 +1005,12 @@ st.divider()
 # Actionable SKU Top List
 st.subheader("要対策SKUトップリスト")
 st.caption("ギャップ = 必要賃率 - 付加価値/分")
-top5 = top_cards
-if len(top5) > 0:
-    card_cols = st.columns(len(top5))
-    for col, row in zip(card_cols, top5.to_dict("records")):
-        roi_txt = "N/A" if pd.isna(row.get("roi_months")) else f"{row['roi_months']:.1f}"
-        gap_txt = "N/A" if pd.isna(row.get("gap")) else f"{row['gap']:.2f}"
-        col.metric(row["product_name"], gap_txt, delta=f"ROI {roi_txt}月")
-        col.caption(
-            " / ".join(
-                [
-                    f"価格+{row['price_improve']:.1f}" if not pd.isna(row.get("price_improve")) else "価格改善情報なし",
-                    f"CT-{row['ct_improve']:.2f}" if not pd.isna(row.get("ct_improve")) else "CT改善情報なし",
-                    f"材料-{row['material_improve']:.1f}" if not pd.isna(row.get("material_improve")) else "材料改善情報なし",
-                ]
-            )
+if not top_list.empty:
+    calendar_html = _render_action_calendar(top_list)
+    if calendar_html:
+        st.markdown(calendar_html, unsafe_allow_html=True)
+        st.caption(
+            "トップ20件を当月カレンダーに割付け、#1〜#5は濃い枠でハイライトしています。色は主な改善アクションを表します。"
         )
 
     table = top_list[[
@@ -609,7 +1025,13 @@ if len(top5) > 0:
         "roi_months":"想定ROI(月)"
     })
     table.insert(0, "選択", False)
-    edited = st.data_editor(table, use_container_width=True, key="action_sku_editor")
+    edited = st.data_editor(
+        table,
+        use_container_width=True,
+        key="action_sku_editor",
+        hide_index=True,
+        height=420,
+    )
     csv_top = edited.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
         "CSV出力",
