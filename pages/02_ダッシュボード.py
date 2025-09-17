@@ -33,29 +33,42 @@ PASTEL_PALETTE = [
 ]
 PASTEL_ACCENT = "#2F6776"
 PASTEL_BG = "#F4F7FA"
+_PASTEL_THEME_NAME = "pastel_mck"
+_PASTEL_THEME_CONFIG = {
+    "config": {
+        "background": PASTEL_BG,
+        "view": {"stroke": "transparent"},
+        "range": {"category": PASTEL_PALETTE},
+        "title": {"color": "#1F2A44"},
+        "axis": {
+            "titleColor": "#1F2A44",
+            "labelColor": "#30405B",
+            "gridColor": "#D7E2EA",
+        },
+        "legend": {"labelColor": "#30405B", "titleColor": "#1F2A44"},
+    }
+}
 
 
-if "pastel_mck" not in alt.themes.names():
+def _register_pastel_theme() -> None:
+    """Register and enable the custom Altair theme across Altair versions."""
 
-    @alt.themes.register("pastel_mck")
-    def _pastel_theme():
-        return {
-            "config": {
-                "background": PASTEL_BG,
-                "view": {"stroke": "transparent"},
-                "range": {"category": PASTEL_PALETTE},
-                "title": {"color": "#1F2A44"},
-                "axis": {
-                    "titleColor": "#1F2A44",
-                    "labelColor": "#30405B",
-                    "gridColor": "#D7E2EA",
-                },
-                "legend": {"labelColor": "#30405B", "titleColor": "#1F2A44"},
-            }
-        }
+    try:
+        theme_api = alt.theme
+        if _PASTEL_THEME_NAME not in theme_api.names():
+
+            @theme_api.register(_PASTEL_THEME_NAME, enable=False)
+            def _pastel_theme():
+                return _PASTEL_THEME_CONFIG
+
+        theme_api.enable(_PASTEL_THEME_NAME)
+    except (AttributeError, TypeError):
+        if _PASTEL_THEME_NAME not in alt.themes.names():
+            alt.themes.register(_PASTEL_THEME_NAME, _PASTEL_THEME_CONFIG)
+        alt.themes.enable(_PASTEL_THEME_NAME)
 
 
-alt.themes.enable("pastel_mck")
+_register_pastel_theme()
 
 st.markdown(
     f"""
