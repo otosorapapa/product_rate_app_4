@@ -14,6 +14,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from urllib.parse import urlencode
+from datetime import date, datetime
 
 from utils import compute_results, detect_quality_issues, detect_anomalies
 from standard_rate_core import DEFAULT_PARAMS, sanitize_params, compute_rates
@@ -27,7 +28,7 @@ from components import (
     render_sidebar_nav,
 )
 import os
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from openai import OpenAI
 
@@ -167,6 +168,134 @@ def _build_plotly_config() -> Dict[str, Any]:
         "modeBarButtonsToAdd": draw_tools,
         "toImageButtonOptions": {"format": "png", "scale": 2},
     }
+
+
+def _normalize_month(value: Any) -> Optional[pd.Timestamp]:
+    """Convert arbitrary date-like input to the first day of its month."""
+
+    if value is None:
+        return None
+    if isinstance(value, pd.Timestamp):
+        ts = value
+    elif isinstance(value, (datetime, date)):
+        ts = pd.Timestamp(value)
+    else:
+        try:
+            ts = pd.to_datetime(value)
+        except Exception:
+            return None
+    if pd.isna(ts):
+        return None
+    return ts.to_period("M").to_timestamp()
+
+
+def _pct_change(previous: float, current: float) -> float:
+    """Compute percentage change while guarding against invalid denominators."""
+
+    if previous in (None, 0) or pd.isna(previous):
+        return np.nan
+    if current in (None,) or pd.isna(current):
+        return np.nan
+    return (current / previous - 1.0) * 100.0
+
+
+def _format_delta(value: float, suffix: str) -> str:
+    """Format change metrics with sign and suffix, handling NaN gracefully."""
+
+    if value is None or pd.isna(value) or not np.isfinite(value):
+        return "N/A"
+    return f"{value:+.1f}{suffix}"
+
+
+def _upsert_trend_record(
+    *,
+    scenario: str,
+    period: pd.Timestamp,
+    ach_rate: float,
+    va_per_min: float,
+    required_rate: float,
+    be_rate: float,
+    note: str = "",
+) -> pd.DataFrame:
+    """Insert or update a monthly KPI snapshot for trend analysis."""
+
+    record = {
+        "scenario": scenario,
+        "period": period,
+        "ach_rate": float(ach_rate) if ach_rate is not None else np.nan,
+        "va_per_min": float(va_per_min) if va_per_min is not None else np.nan,
+        "required_rate": float(required_rate) if required_rate is not None else np.nan,
+        "be_rate": float(be_rate) if be_rate is not None else np.nan,
+        "note": note,
+        "recorded_at": pd.Timestamp.utcnow(),
+    }
+    history = st.session_state.get("monthly_trend")
+    if history is None or getattr(history, "empty", True):
+        history = pd.DataFrame(columns=list(record.keys()))
+    else:
+        history = history.copy()
+        history["period"] = pd.to_datetime(history["period"])
+    mask = (history["scenario"] == scenario) & (history["period"] == period)
+    history = history[~mask]
+    history = pd.concat([history, pd.DataFrame([record])], ignore_index=True)
+    history = history.sort_values(["period", "scenario"]).reset_index(drop=True)
+    st.session_state["monthly_trend"] = history
+    return history
+
+
+def _prepare_trend_dataframe(trend_df: pd.DataFrame, freq: str) -> pd.DataFrame:
+    """Return data aggregated at the requested frequency for plotting."""
+
+    if trend_df is None or trend_df.empty:
+        return pd.DataFrame(columns=["scenario", "period", "ach_rate", "va_per_min", "required_rate", "be_rate"])
+    df = trend_df.copy()
+    df["period"] = pd.to_datetime(df["period"])
+    df = df.dropna(subset=["period"])
+    if freq == "四半期":
+        df["period"] = df["period"].dt.to_period("Q").dt.to_timestamp()
+        grouped = (
+            df.groupby(["scenario", "period"], as_index=False)
+            .agg(
+                ach_rate=("ach_rate", "mean"),
+                va_per_min=("va_per_min", "mean"),
+                required_rate=("required_rate", "mean"),
+                be_rate=("be_rate", "mean"),
+            )
+        )
+        return grouped.sort_values(["period", "scenario"])
+    df["period"] = df["period"].dt.to_period("M").dt.to_timestamp()
+    df = df.sort_values(["period", "scenario"])
+    return df[["scenario", "period", "ach_rate", "va_per_min", "required_rate", "be_rate", "note", "recorded_at"]]
+
+
+def _build_yoy_summary(trend_df: pd.DataFrame, scenarios: List[str]) -> List[str]:
+    """Create human-friendly YoY comparison sentences for the latest month."""
+
+    if trend_df is None or trend_df.empty:
+        return []
+    df = trend_df.copy()
+    df["period"] = pd.to_datetime(df["period"])
+    df = df.dropna(subset=["period"])
+    df["month"] = df["period"].dt.to_period("M")
+    df = df.sort_values(["month", "scenario"])
+    summaries: List[str] = []
+    for scen in scenarios:
+        scen_df = df[df["scenario"] == scen]
+        if scen_df.empty:
+            continue
+        latest = scen_df.iloc[-1]
+        prev_month = latest["month"] - 12
+        prev_rows = scen_df[scen_df["month"] == prev_month]
+        if prev_rows.empty:
+            continue
+        prev = prev_rows.iloc[-1]
+        yoy_req = _pct_change(prev["required_rate"], latest["required_rate"])
+        yoy_va = _pct_change(prev["va_per_min"], latest["va_per_min"])
+        yoy_ach = latest["ach_rate"] - prev["ach_rate"]
+        summaries.append(
+            f"{scen}: 必要賃率 {_format_delta(yoy_req, '%')} / VA/分 {_format_delta(yoy_va, '%')} / 達成率 {_format_delta(yoy_ach, 'pt')}"
+        )
+    return summaries
 
 
 def _generate_dashboard_comment(
@@ -433,6 +562,102 @@ avg_vapm = df_view["va_per_min"].replace([np.inf,-np.inf], np.nan).dropna().mean
 if qp or qc or qm:
     st.caption(f"Quick試算中: 価格{qp:+d}%, CT{qc:+d}%, 材料{qm:+d}%")
 
+trend_history = st.session_state.get("monthly_trend")
+if trend_history is None:
+    trend_history = pd.DataFrame(
+        columns=[
+            "scenario",
+            "period",
+            "ach_rate",
+            "va_per_min",
+            "required_rate",
+            "be_rate",
+            "note",
+            "recorded_at",
+        ]
+    )
+    st.session_state["monthly_trend"] = trend_history
+
+with st.expander("📈 月次スナップショットを記録", expanded=False):
+    st.caption("現在表示中のKPIを対象月として保存します。再度同じ月を保存すると上書きされます。")
+    default_month = st.session_state.get("trend_snapshot_month")
+    if not isinstance(default_month, (datetime, date)):
+        default_month = pd.Timestamp.today().to_pydatetime()
+    col_t1, col_t2, col_t3, col_t4 = st.columns([1.3, 1.1, 1.1, 0.8])
+    snapshot_month = col_t1.date_input("対象年月", value=default_month, key="trend_month_input")
+    st.session_state["trend_snapshot_month"] = snapshot_month
+    scen_default_idx = scenario_options.index(scenario_name) if scenario_name in scenario_options else 0
+    scenario_for_snapshot = col_t2.selectbox(
+        "対象シナリオ",
+        options=scenario_options,
+        index=scen_default_idx,
+        key="trend_scenario_input",
+    )
+    note_value = col_t3.text_input("メモ (任意)", key="trend_note_input")
+    save_snapshot = col_t4.button("保存/更新", key="trend_save_btn")
+
+    if save_snapshot:
+        period = _normalize_month(snapshot_month)
+        if period is None:
+            st.warning("対象年月を正しく指定してください。")
+        else:
+            metrics_map = {
+                "ベース": (base_ach_rate, base_avg_vapm, df_base),
+                "施策A": (ach_rate, avg_vapm, df_view),
+            }
+            ach_val, vapm_val, df_candidate = metrics_map.get(
+                scenario_for_snapshot,
+                (np.nan, np.nan, pd.DataFrame()),
+            )
+            if df_candidate.empty:
+                st.warning("対象シナリオのデータがありません。フィルタ条件をご確認ください。")
+            else:
+                trend_history = _upsert_trend_record(
+                    scenario=scenario_for_snapshot,
+                    period=period,
+                    ach_rate=ach_val,
+                    va_per_min=vapm_val,
+                    required_rate=req_rate,
+                    be_rate=be_rate,
+                    note=note_value,
+                )
+                st.success(f"{period.strftime('%Y-%m')} の {scenario_for_snapshot} を記録しました。")
+
+    trend_history = st.session_state.get("monthly_trend", pd.DataFrame())
+    if not trend_history.empty:
+        history_display = trend_history.copy()
+        history_display["period"] = pd.to_datetime(history_display["period"]).dt.strftime("%Y-%m")
+        history_display["ach_rate"] = history_display["ach_rate"].map(lambda x: f"{x:.1f}%" if pd.notna(x) else "-")
+        history_display["va_per_min"] = history_display["va_per_min"].map(lambda x: f"{x:.2f}" if pd.notna(x) else "-")
+        history_display["required_rate"] = history_display["required_rate"].map(lambda x: f"{x:.3f}" if pd.notna(x) else "-")
+        history_display["be_rate"] = history_display["be_rate"].map(lambda x: f"{x:.3f}" if pd.notna(x) else "-")
+        history_display = history_display[["period", "scenario", "ach_rate", "va_per_min", "required_rate", "be_rate", "note"]]
+        st.dataframe(history_display, use_container_width=True)
+
+        option_map = {
+            f"{pd.to_datetime(row['period']).strftime('%Y-%m')}｜{row['scenario']}": (
+                pd.to_datetime(row["period"]),
+                row["scenario"],
+            )
+            for _, row in trend_history.sort_values(["period", "scenario"]).iterrows()
+        }
+        del_col1, del_col2 = st.columns([1.6, 0.4])
+        delete_choice = del_col1.selectbox(
+            "削除する記録",
+            options=["選択なし"] + list(option_map.keys()),
+            key="trend_delete_select",
+        )
+        if del_col2.button("削除", key="trend_delete_btn") and delete_choice != "選択なし":
+            target_period, target_scenario = option_map[delete_choice]
+            updated = trend_history[
+                ~(
+                    (trend_history["scenario"] == target_scenario)
+                    & (pd.to_datetime(trend_history["period"]) == target_period)
+                )
+            ].reset_index(drop=True)
+            st.session_state["monthly_trend"] = updated
+            st.success(f"{target_period.strftime('%Y-%m')} の {target_scenario} を削除しました。")
+
 # === KPI Targets & Cards ===
 role = st.session_state.get("role", "一般")
 st.session_state.setdefault("target_req_rate", req_rate)
@@ -693,69 +918,130 @@ with tabs[0]:
     st.plotly_chart(fig, use_container_width=True, config=_build_plotly_config())
 
 with tabs[1]:
-    st.caption("月次の達成SKU比率と平均VA/分の推移。ベースと施策Aを比較。")
-    trend_df = st.session_state.get("monthly_trend")
-    if trend_df is None or trend_df.empty:
-        months = pd.date_range(end=pd.Timestamp.today(), periods=6, freq="M")
-        base = pd.DataFrame({
-            "month": months,
-            "achieved_ratio": np.linspace(0.6, 0.7, len(months)),
-            "va_per_min": np.linspace(100, 110, len(months)),
-            "scenario": "ベース",
-        })
-        plan = base.copy()
-        plan["achieved_ratio"] += 0.05
-        plan["va_per_min"] += 5
-        plan["scenario"] = "施策A"
-        trend_df = pd.concat([base, plan], ignore_index=True)
-    fig_ts = make_subplots(specs=[[{"secondary_y": True}]])
-    scenario_colors = {
-        scen: PASTEL_PALETTE[idx % len(PASTEL_PALETTE)]
-        for idx, scen in enumerate(sorted(trend_df["scenario"].unique()))
-    }
-    for scen, g in trend_df.groupby("scenario"):
-        fig_ts.add_trace(
-            go.Scatter(
-                x=g["month"],
-                y=g["achieved_ratio"],
-                mode="lines+markers",
-                name=f"{scen} 達成比率",
-                line=dict(color=scenario_colors.get(scen), width=2.5),
-                marker=dict(size=8),
-            ),
-            secondary_y=False,
-        )
-        fig_ts.add_trace(
-            go.Scatter(
-                x=g["month"],
-                y=g["va_per_min"],
-                mode="lines+markers",
-                name=f"{scen} 平均VA/分",
-                line=dict(color=scenario_colors.get(scen, PASTEL_ACCENT), width=2, dash="dot"),
-                marker=dict(size=8, symbol="diamond"),
-            ),
-            secondary_y=True,
-        )
-    fig_ts.update_yaxes(title_text="達成SKU比率", range=[0,1], secondary_y=False)
-    fig_ts.update_yaxes(title_text="平均VA/分", secondary_y=True)
-    fig_ts.update_xaxes(
-        gridcolor="#D7E2EA",
-        rangeslider=dict(visible=st.session_state["show_rangeslider"]),
-        rangeselector=dict(
-            buttons=[
-                dict(count=3, label="3M", step="month", stepmode="backward"),
-                dict(count=6, label="6M", step="month", stepmode="backward"),
-                dict(step="all", label="ALL"),
-            ],
-            bgcolor="rgba(47,103,118,0.08)",
-            activecolor="#2F6776",
-            font=dict(color="#1F2A44"),
-        ),
-    )
-    fig_ts.update_yaxes(gridcolor="#D7E2EA", secondary_y=False)
-    fig_ts.update_yaxes(gridcolor="#D7E2EA", secondary_y=True)
-    fig_ts = _apply_plotly_theme(fig_ts, show_spikelines=st.session_state["show_spikelines"])
-    st.plotly_chart(fig_ts, use_container_width=True, config=_build_plotly_config())
+    st.caption("月次・四半期のKPI推移を確認し、施策効果をトレースします。")
+    trend_df = st.session_state.get("monthly_trend", pd.DataFrame())
+    if trend_df.empty:
+        st.info("『月次スナップショットを記録』からデータを保存すると時系列が表示されます。")
+    else:
+        available_scenarios = sorted(trend_df["scenario"].dropna().unique().tolist())
+        filtered = trend_df[trend_df["scenario"].isin([s for s in selected_scenarios if s in available_scenarios])]
+        if filtered.empty:
+            st.warning("選択中のシナリオでは時系列データがまだ登録されていません。")
+        else:
+            st.session_state.setdefault("trend_freq", "月次")
+            freq_choice = st.radio(
+                "集計粒度",
+                options=["月次", "四半期"],
+                horizontal=True,
+                key="trend_freq",
+            )
+            plot_df = _prepare_trend_dataframe(filtered, freq_choice)
+            if plot_df.empty:
+                st.warning("表示対象の時系列データが不足しています。")
+            else:
+                yoy_lines = _build_yoy_summary(
+                    trend_df,
+                    sorted(plot_df["scenario"].unique()),
+                )
+                if yoy_lines:
+                    st.markdown("**前年同月比**")
+                    st.markdown("\n".join(f"- {line}" for line in yoy_lines))
+                fig_ts = make_subplots(specs=[[{"secondary_y": True}]])
+                scenario_colors = {
+                    scen: PASTEL_PALETTE[idx % len(PASTEL_PALETTE)]
+                    for idx, scen in enumerate(sorted(plot_df["scenario"].unique()))
+                }
+                for scen, group in plot_df.groupby("scenario"):
+                    g = group.sort_values("period")
+                    fig_ts.add_trace(
+                        go.Scatter(
+                            x=g["period"],
+                            y=g["va_per_min"],
+                            mode="lines+markers",
+                            name=f"{scen} VA/分",
+                            line=dict(color=scenario_colors.get(scen), width=2.5),
+                            marker=dict(size=8),
+                        ),
+                        secondary_y=False,
+                    )
+                    fig_ts.add_trace(
+                        go.Scatter(
+                            x=g["period"],
+                            y=g["required_rate"],
+                            mode="lines+markers",
+                            name=f"{scen} 必要賃率",
+                            line=dict(color=scenario_colors.get(scen), width=2, dash="dash"),
+                            marker=dict(size=7, symbol="diamond"),
+                        ),
+                        secondary_y=False,
+                    )
+                    fig_ts.add_trace(
+                        go.Scatter(
+                            x=g["period"],
+                            y=g["ach_rate"],
+                            mode="lines+markers",
+                            name=f"{scen} 達成率",
+                            line=dict(color=scenario_colors.get(scen), width=2, dash="dot"),
+                            marker=dict(size=7),
+                            opacity=0.8,
+                        ),
+                        secondary_y=True,
+                    )
+                fig_ts.update_yaxes(
+                    title_text="VA/分・必要賃率 (円/分)",
+                    secondary_y=False,
+                    gridcolor="#D7E2EA",
+                )
+                fig_ts.update_yaxes(
+                    title_text="必要賃率達成率 (%)",
+                    range=[0, 100],
+                    secondary_y=True,
+                    gridcolor="#D7E2EA",
+                )
+                fig_ts.update_xaxes(
+                    gridcolor="#D7E2EA",
+                    rangeslider=dict(visible=st.session_state["show_rangeslider"]),
+                    rangeselector=dict(
+                        buttons=[
+                            dict(count=3, label="3M", step="month", stepmode="backward"),
+                            dict(count=6, label="6M", step="month", stepmode="backward"),
+                            dict(step="all", label="ALL"),
+                        ],
+                        bgcolor="rgba(47,103,118,0.08)",
+                        activecolor="#2F6776",
+                        font=dict(color="#1F2A44"),
+                    ),
+                )
+                fig_ts = _apply_plotly_theme(
+                    fig_ts, show_spikelines=st.session_state["show_spikelines"]
+                )
+                st.plotly_chart(fig_ts, use_container_width=True, config=_build_plotly_config())
+
+                display_df = plot_df.copy()
+                if freq_choice == "四半期":
+                    display_df["期間"] = display_df["period"].dt.to_period("Q").astype(str)
+                else:
+                    display_df["期間"] = display_df["period"].dt.strftime("%Y-%m")
+                display_df = display_df.sort_values(["period", "scenario"])
+                summary_table = pd.DataFrame(
+                    {
+                        "期間": display_df["期間"],
+                        "シナリオ": display_df["scenario"],
+                        "必要賃率 (円/分)": display_df["required_rate"].map(
+                            lambda x: f"{x:.3f}" if pd.notna(x) else "-"
+                        ),
+                        "平均VA/分": display_df["va_per_min"].map(
+                            lambda x: f"{x:.2f}" if pd.notna(x) else "-"
+                        ),
+                        "必要賃率達成率": display_df["ach_rate"].map(
+                            lambda x: f"{x:.1f}%" if pd.notna(x) else "-"
+                        ),
+                        "損益分岐賃率": display_df["be_rate"].map(
+                            lambda x: f"{x:.3f}" if pd.notna(x) else "-"
+                        ),
+                    }
+                )
+                st.dataframe(summary_table, use_container_width=True)
 
 with tabs[2]:
     c1, c2 = st.columns([1.2,1])
