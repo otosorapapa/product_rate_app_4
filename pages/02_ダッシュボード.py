@@ -18,6 +18,9 @@ from urllib.parse import urlencode
 from utils import compute_results, detect_quality_issues, detect_anomalies
 from standard_rate_core import DEFAULT_PARAMS, sanitize_params, compute_rates
 from components import (
+    apply_user_theme,
+    get_active_theme_palette,
+    render_help_button,
     render_onboarding,
     render_page_tutorial,
     render_stepper,
@@ -54,6 +57,20 @@ _PASTEL_THEME_CONFIG = {
     }
 }
 
+_palette = get_active_theme_palette()
+PASTEL_BG = _palette["surface"]
+PASTEL_ACCENT = _palette["accent"]
+_PASTEL_THEME_CONFIG["config"]["background"] = PASTEL_BG
+_PASTEL_THEME_CONFIG["config"]["title"]["color"] = _palette["text"]
+_PASTEL_THEME_CONFIG["config"]["axis"]["titleColor"] = _palette["text"]
+_PASTEL_THEME_CONFIG["config"]["axis"]["labelColor"] = _palette["text"]
+_PASTEL_THEME_CONFIG["config"]["axis"]["gridColor"] = _palette["border"]
+_PASTEL_THEME_CONFIG["config"]["legend"]["labelColor"] = _palette["text"]
+_PASTEL_THEME_CONFIG["config"]["legend"]["titleColor"] = _palette["text"]
+
+
+apply_user_theme()
+
 
 def _register_pastel_theme() -> None:
     """Register and enable the custom Altair theme across Altair versions."""
@@ -76,26 +93,27 @@ def _register_pastel_theme() -> None:
 _register_pastel_theme()
 
 st.markdown(
-    f"""
+    """
     <style>
-    .main > div {{
-        background-color: {PASTEL_BG};
-    }}
-    [data-testid="stMetric"] {{
-        background-color: #FFFFFF;
+    .main > div {
+        background-color: var(--app-bg);
+    }
+    [data-testid="stMetric"] {
+        background-color: var(--app-surface);
         border-radius: 18px;
-        border: 1px solid #D7E2EA;
+        border: 1px solid var(--app-border);
         padding: 12px 16px;
-        box-shadow: 0 6px 12px rgba(31,42,68,0.06);
-    }}
-    [data-testid="stMetricDelta"] span {{
+        box-shadow: 0 6px 12px rgba(0, 0, 0, 0.06);
+        color: var(--app-text);
+    }
+    [data-testid="stMetricDelta"] span {
         font-weight: 600;
-    }}
-    .metric-badge {{
-        text-align:right;
-        color: #2F6776;
+    }
+    .metric-badge {
+        text-align: right;
+        color: var(--app-accent);
         font-weight: 600;
-    }}
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -111,8 +129,8 @@ def _apply_plotly_theme(fig: go.Figure, *, show_spikelines: bool = False, legend
         y=1.02,
         xanchor="right",
         x=1.0,
-        bgcolor="rgba(255,255,255,0.6)",
-        bordercolor="rgba(47,103,118,0.15)",
+        bgcolor=_palette["surface"],
+        bordercolor=_palette["border"],
         borderwidth=1,
     )
     if legend_bottom:
@@ -121,7 +139,7 @@ def _apply_plotly_theme(fig: go.Figure, *, show_spikelines: bool = False, legend
     fig.update_layout(
         plot_bgcolor=PASTEL_BG,
         paper_bgcolor=PASTEL_BG,
-        font=dict(color="#1F2A44"),
+        font=dict(color=_palette["text"]),
         legend=legend_conf,
         margin=dict(l=40, r=30, t=60, b=60),
     )
@@ -226,6 +244,7 @@ def _generate_dashboard_comment(
 
 st.title("② ダッシュボード")
 render_sidebar_nav(page_key="dashboard")
+render_help_button("dashboard")
 
 render_onboarding()
 render_page_tutorial("dashboard")

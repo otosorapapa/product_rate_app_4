@@ -13,14 +13,19 @@ from utils import (
     validate_product_dataframe,
 )
 from components import (
+    apply_user_theme,
+    render_help_button,
     render_onboarding,
     render_page_tutorial,
     render_stepper,
     render_sidebar_nav,
 )
 
+apply_user_theme()
+
 st.title("① データ入力 & 取り込み")
 render_sidebar_nav(page_key="data")
+render_help_button("data")
 
 render_onboarding()
 render_page_tutorial("data")
