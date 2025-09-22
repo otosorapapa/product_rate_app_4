@@ -5,7 +5,12 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from components import render_stepper, render_sidebar_nav
+from components import (
+    render_onboarding,
+    render_page_tutorial,
+    render_stepper,
+    render_sidebar_nav,
+)
 import os
 from openai import OpenAI
 
@@ -36,7 +41,10 @@ from standard_rate_core import (
 )
 
 st.title("③ 標準賃率 計算/感度分析")
-render_sidebar_nav()
+render_sidebar_nav(page_key="standard_rate")
+
+render_onboarding()
+render_page_tutorial("standard_rate")
 render_stepper(4)
 
 st.markdown(

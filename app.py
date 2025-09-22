@@ -1,12 +1,22 @@
 import streamlit as st
-from components import render_stepper, render_sidebar_nav
+from components import (
+    render_onboarding,
+    render_page_tutorial,
+    render_stepper,
+    render_sidebar_nav,
+)
 
 st.set_page_config(page_title="賃率ダッシュボード", layout="wide")
 
-render_sidebar_nav()
+render_sidebar_nav(page_key="home")
 
 st.title("製品賃率ダッシュボード")
 st.caption("📊 Excel（標賃 / R6.12）から賃率KPIを自動計算し、SKU別の達成状況を可視化します。")
+
+render_onboarding()
+
+# Page-specific tutorial with glossary support
+render_page_tutorial("home")
 
 # Progress stepper for wizard flow
 render_stepper(0)

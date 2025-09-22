@@ -17,7 +17,12 @@ from urllib.parse import urlencode
 
 from utils import compute_results, detect_quality_issues, detect_anomalies
 from standard_rate_core import DEFAULT_PARAMS, sanitize_params, compute_rates
-from components import render_stepper, render_sidebar_nav
+from components import (
+    render_onboarding,
+    render_page_tutorial,
+    render_stepper,
+    render_sidebar_nav,
+)
 import os
 from typing import Dict, Any, List
 
@@ -220,7 +225,10 @@ def _generate_dashboard_comment(
         return f"AIコメント生成に失敗しました: {exc}"
 
 st.title("② ダッシュボード")
-render_sidebar_nav()
+render_sidebar_nav(page_key="dashboard")
+
+render_onboarding()
+render_page_tutorial("dashboard")
 render_stepper(4)
 scenario_name = st.session_state.get("current_scenario", "ベース")
 st.caption(f"適用中シナリオ: {scenario_name}")
