@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from io import BytesIO
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Any, Tuple, Optional
+from typing import Dict, List, Any, Tuple, Optional, Callable
 
 # --------------- Low-level helpers ---------------
 def _clean(s):
@@ -162,12 +163,20 @@ def parse_products(xls: pd.ExcelFile, sheet_name: str="R6.12") -> Tuple[pd.DataF
     data.columns = cols
     data.columns = [c.replace("\n","") if isinstance(c,str) else c for c in data.columns]
 
-    keep = [k for k in [
-        "製品№ (1)","製品名 (大福生地)","実際売単価","必要販売単価","損益分岐単価","必要単価",
-        "外注費","原価（材料費）","粗利 (0)","月間製造数(個数）","月間売上 (0)","月間支払 (0)",
-        "付加価値率","日産製造数（個数）","合計 (151)","付加価値","1分当り付加価値","時","分",
-        "受注数当り付加価値/日 (0)","1分当り付加価値2 (0)"
-    ] if k in data.columns]
+    keep_candidates = [
+        "製品№ (1)", "製品名 (大福生地)", "実際売単価", "必要販売単価", "損益分岐単価", "必要単価",
+        "外注費", "原価（材料費）", "粗利 (0)", "月間製造数(個数）", "月間売上 (0)", "月間支払 (0)",
+        "付加価値率", "日産製造数（個数）", "合計 (151)", "付加価値", "1分当り付加価値", "時", "分",
+        "受注数当り付加価値/日 (0)", "1分当り付加価値2 (0)",
+        "製品№", "製品番号", "製品番号 (コード)", "製品№ (コード)",
+        "製品名", "製品名 (名称)",
+        "実際売単価 (円/個)", "販売単価", "販売単価 (円/個)", "販売価格", "販売価格 (円/個)",
+        "原価（材料費） (円/個)", "材料費", "材料費 (円/個)",
+        "リードタイム", "リードタイム (分/個)", "タクトタイム", "タクトタイム (分/個)",
+        "日産製造数（個数） (個/日)", "日産数", "日産数 (個/日)",
+        "備考", "備考 (任意)",
+    ]
+    keep = [k for k in dict.fromkeys(keep_candidates) if k in data.columns]
     df = data[keep].copy()
 
     def to_float(x):
@@ -178,16 +187,41 @@ def parse_products(xls: pd.ExcelFile, sheet_name: str="R6.12") -> Tuple[pd.DataF
         except Exception:
             return np.nan
 
+    text_columns = {
+        "製品№ (1)", "製品名 (大福生地)", "製品№", "製品番号", "製品番号 (コード)",
+        "製品№ (コード)", "製品名", "製品名 (名称)", "備考", "備考 (任意)"
+    }
     for col in df.columns:
-        if col not in ["製品№ (1)","製品名 (大福生地)"]:
+        if col not in text_columns:
             df[col] = df[col].map(to_float)
 
     rename_map = {
         "製品№ (1)": "product_no",
         "製品名 (大福生地)": "product_name",
+        "製品№": "product_no",
+        "製品番号": "product_no",
+        "製品番号 (コード)": "product_no",
+        "製品№ (コード)": "product_no",
+        "製品名": "product_name",
+        "製品名 (名称)": "product_name",
         "実際売単価": "actual_unit_price",
+        "実際売単価 (円/個)": "actual_unit_price",
+        "販売単価": "actual_unit_price",
+        "販売単価 (円/個)": "actual_unit_price",
+        "販売価格": "actual_unit_price",
+        "販売価格 (円/個)": "actual_unit_price",
         "原価（材料費）": "material_unit_cost",
+        "原価（材料費） (円/個)": "material_unit_cost",
+        "材料費": "material_unit_cost",
+        "材料費 (円/個)": "material_unit_cost",
+        "リードタイム": "minutes_per_unit",
+        "リードタイム (分/個)": "minutes_per_unit",
+        "タクトタイム": "minutes_per_unit",
+        "タクトタイム (分/個)": "minutes_per_unit",
         "日産製造数（個数）": "daily_qty",
+        "日産製造数（個数） (個/日)": "daily_qty",
+        "日産数": "daily_qty",
+        "日産数 (個/日)": "daily_qty",
         "分": "minutes_per_unit",
         "合計 (151)": "daily_total_minutes",
         "付加価値": "daily_va",
@@ -196,6 +230,8 @@ def parse_products(xls: pd.ExcelFile, sheet_name: str="R6.12") -> Tuple[pd.DataF
         "損益分岐単価": "be_unit_price_excel",
         "必要単価": "req_va_unit_price_excel",
         "粗利 (0)": "gp_per_unit_excel",
+        "備考": "notes",
+        "備考 (任意)": "notes",
     }
     df = df.rename(columns={k:v for k,v in rename_map.items() if k in df.columns})
 
@@ -238,6 +274,292 @@ def parse_products(xls: pd.ExcelFile, sheet_name: str="R6.12") -> Tuple[pd.DataF
 
     df = df[~(df.get("product_name").isna() & df.get("actual_unit_price").isna())].reset_index(drop=True)
     return df, warnings
+
+
+TEMPLATE_FIELD_GUIDE: List[Dict[str, Any]] = [
+    {
+        "Excel列名": "製品№",
+        "説明": "製品コード。半角英数字やハイフンで記入します。",
+        "単位/形式": "コード",
+        "サンプル値": "P-1001",
+    },
+    {
+        "Excel列名": "製品名",
+        "説明": "製品・SKUの正式名称。",
+        "単位/形式": "テキスト",
+        "サンプル値": "苺大福",
+    },
+    {
+        "Excel列名": "実際売単価",
+        "説明": "1個あたりの実際販売価格（税抜）。",
+        "単位/形式": "円/個",
+        "サンプル値": 320,
+    },
+    {
+        "Excel列名": "原価（材料費）",
+        "説明": "1個あたりの材料費。副資材も含める場合は合算してください。",
+        "単位/形式": "円/個",
+        "サンプル値": 120,
+    },
+    {
+        "Excel列名": "リードタイム",
+        "説明": "1個を製造するのに必要な時間。分単位で入力します。",
+        "単位/形式": "分/個",
+        "サンプル値": 4.5,
+    },
+    {
+        "Excel列名": "日産製造数（個数）",
+        "説明": "1日あたりの生産数量（能力値）。",
+        "単位/形式": "個/日",
+        "サンプル値": 800,
+    },
+    {
+        "Excel列名": "備考",
+        "説明": "任意入力欄。ライン名や補足情報などがあれば記入します。",
+        "単位/形式": "任意",
+        "サンプル値": "既存ラインA",
+    },
+]
+
+
+def get_product_template_guide() -> pd.DataFrame:
+    """Return a DataFrame describing the Excel input template columns."""
+
+    return pd.DataFrame(TEMPLATE_FIELD_GUIDE)
+
+
+def generate_product_template() -> bytes:
+    """Generate a starter Excel workbook for product data entry."""
+
+    guide_df = get_product_template_guide()
+
+    product_header = [
+        "製品№",
+        "製品名",
+        "実際売単価",
+        "原価（材料費）",
+        "リードタイム",
+        "日産製造数（個数）",
+        "備考",
+    ]
+    product_units = ["コード", "名称", "円/個", "円/個", "分/個", "個/日", "任意"]
+    product_samples = [
+        ["P-1001", "苺大福", 320, 120, 4.5, 800, "既存ラインA"],
+        ["P-1002", "栗大福", 280, 110, 3.8, 600, "新規投入予定"],
+    ]
+    product_rows = [product_header, product_units, *product_samples]
+    template_df = pd.DataFrame(product_rows)
+
+    hyochin_columns = ["", "項目", "区分", "値", "補足"]
+    hyochin_rows = [
+        ["", "労務費", "", 24_000_000, ""],
+        ["", "販管費", "", 12_000_000, ""],
+        ["", "借入返済", "", 3_600_000, ""],
+        ["", "納税", "", 3_000_000, ""],
+        ["", "未来事業費", "", 1_200_000, ""],
+        ["", "直接工員数", "正社員", 25, ""],
+        ["", "", "準社員➀", 8, ""],
+        ["", "", "準社員②", 5, ""],
+        ["", "", "労働係数", 0.8, "準社員②の労働係数"],
+        ["", "年間稼働日数", "", 250, ""],
+        ["", "1日当り稼働時間", "", 7.5, ""],
+        ["", "1日当り操業度", "", 0.85, ""],
+    ]
+    hyochin_df = pd.DataFrame(hyochin_rows, columns=hyochin_columns)
+
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        guide_df.to_excel(writer, sheet_name="入力ガイド", index=False)
+        template_df.to_excel(writer, sheet_name="R6.12", header=False, index=False)
+        hyochin_df.to_excel(writer, sheet_name="標賃", header=False, index=False)
+
+    return buffer.getvalue()
+
+
+def validate_product_dataframe(
+    df: pd.DataFrame,
+) -> Tuple[List[str], List[str], pd.DataFrame]:
+    """Validate core product master fields and surface actionable issues.
+
+    Returns
+    -------
+    (errors, warnings, detail_df)
+        ``errors`` と ``warnings`` は画面表示用のメッセージ文字列、
+        ``detail_df`` は問題のある製品の一覧です。
+    """
+
+    errors: List[str] = []
+    warnings: List[str] = []
+    detail_rows: List[Dict[str, Any]] = []
+
+    column_info: Dict[str, Dict[str, Any]] = {
+        "product_no": {"label": "製品番号", "missing_level": "error"},
+        "product_name": {"label": "製品名", "missing_level": "error"},
+        "actual_unit_price": {
+            "label": "販売単価（円/個）",
+            "missing_level": "warning",
+        },
+        "material_unit_cost": {
+            "label": "材料費（円/個）",
+            "missing_level": "warning",
+        },
+        "minutes_per_unit": {
+            "label": "リードタイム（分/個）",
+            "missing_level": "warning",
+        },
+        "daily_qty": {
+            "label": "日産数（個/日）",
+            "missing_level": "warning",
+        },
+    }
+
+    missing_columns = [
+        meta["label"]
+        for col, meta in column_info.items()
+        if col not in df.columns
+    ]
+    for label in missing_columns:
+        errors.append(
+            f"{label}の列が見つかりません。公式テンプレートを使用し、列名と単位を確認してください。"
+        )
+    if missing_columns:
+        return errors, warnings, pd.DataFrame(
+            columns=["レベル", "製品番号", "製品名", "項目", "内容", "入力値"]
+        )
+
+    def resolve_detail(detail: Any, row: pd.Series) -> Any:
+        if callable(detail):
+            return detail(row)
+        return detail
+
+    def register_issue(
+        mask: pd.Series,
+        column_key: str,
+        level: str,
+        message: str,
+        detail: Any,
+        value_column: Optional[str] = None,
+    ) -> None:
+        count = int(mask.sum())
+        if count <= 0:
+            return
+
+        label = column_info.get(column_key, {}).get("label", column_key)
+        formatted = message.format(count=count, label=label)
+        if level == "error":
+            errors.append(formatted)
+        else:
+            warnings.append(formatted)
+
+        value_col = value_column or column_key
+        subset_cols = [c for c in ["product_no", "product_name", value_col] if c in df.columns]
+        subset = df.loc[mask, subset_cols]
+        for _, row in subset.iterrows():
+            raw_value = row.get(value_col, "") if value_col in row else ""
+            if pd.isna(raw_value):
+                raw_value = ""
+            detail_rows.append(
+                {
+                    "レベル": "エラー" if level == "error" else "警告",
+                    "製品番号": row.get("product_no"),
+                    "製品名": row.get("product_name"),
+                    "項目": label,
+                    "内容": resolve_detail(detail, row),
+                    "入力値": raw_value,
+                }
+            )
+
+    # Missing values
+    for col, meta in column_info.items():
+        mask = df[col].isna()
+        if mask.any():
+            level = meta.get("missing_level", "warning")
+            register_issue(
+                mask,
+                col,
+                level,
+                "{label}が未入力の製品が{count}件あります。テンプレートのサンプルを参考に入力してください。",
+                "未入力",
+            )
+
+    # Invalid or suspicious values
+    value_checks = [
+        {
+            "column": "minutes_per_unit",
+            "level": "error",
+            "message": "リードタイム（分/個）が0以下の製品が{count}件あります。正しい値を入力してください。",
+            "detail": "リードタイムが0以下",
+            "condition": lambda s: s <= 0,
+        },
+        {
+            "column": "actual_unit_price",
+            "level": "error",
+            "message": "販売単価（円/個）が0以下の製品が{count}件あります。単価を見直してください。",
+            "detail": "販売単価が0以下",
+            "condition": lambda s: s <= 0,
+        },
+        {
+            "column": "material_unit_cost",
+            "level": "error",
+            "message": "材料費（円/個）が負の値の製品が{count}件あります。単位や入力値を確認してください。",
+            "detail": "材料費が負の値",
+            "condition": lambda s: s < 0,
+        },
+        {
+            "column": "daily_qty",
+            "level": "error",
+            "message": "日産数（個/日）が0以下の製品が{count}件あります。生産能力を入力してください。",
+            "detail": "日産数が0以下",
+            "condition": lambda s: s <= 0,
+        },
+        {
+            "column": "minutes_per_unit",
+            "level": "warning",
+            "message": "リードタイム（分/個）が600分を超える製品が{count}件あります。時間の単位（分）を確認してください。",
+            "detail": "リードタイムが600分超",
+            "condition": lambda s: s > 600,
+        },
+    ]
+
+    for check in value_checks:
+        col = check["column"]
+        if col not in df.columns:
+            continue
+        mask = check["condition"](df[col].astype(float))
+        register_issue(mask, col, check["level"], check["message"], check["detail"])
+
+    # Material cost higher than selling price
+    if {"actual_unit_price", "material_unit_cost"}.issubset(df.columns):
+        mask = df["actual_unit_price"].notna() & df["material_unit_cost"].notna()
+        mask &= df["actual_unit_price"] < df["material_unit_cost"]
+        register_issue(
+            mask,
+            "actual_unit_price",
+            "warning",
+            "材料費が販売単価を上回る製品が{count}件あります。採算を確認してください。",
+            lambda row: (
+                f"販売単価 {row.get('actual_unit_price')} < 材料費 {row.get('material_unit_cost')}"
+            ),
+            value_column="actual_unit_price",
+        )
+
+    # Duplicate product numbers
+    if "product_no" in df.columns:
+        dup_mask = df["product_no"].duplicated(keep=False)
+        register_issue(
+            dup_mask,
+            "product_no",
+            "error",
+            "製品番号が重複している行が{count}件あります。各製品に一意の番号を設定してください。",
+            "製品番号が重複",
+        )
+
+    detail_df = pd.DataFrame(
+        detail_rows,
+        columns=["レベル", "製品番号", "製品名", "項目", "内容", "入力値"],
+    )
+
+    return errors, warnings, detail_df
 
 # --------------- Core compute ---------------
 def compute_results(
