@@ -16,7 +16,12 @@ from plotly.subplots import make_subplots
 from urllib.parse import urlencode
 from datetime import date, datetime
 
-from utils import compute_results, detect_quality_issues, detect_anomalies
+from utils import (
+    compute_results,
+    detect_quality_issues,
+    detect_anomalies,
+    summarize_segment_performance,
+)
 from standard_rate_core import DEFAULT_PARAMS, sanitize_params, compute_rates
 from components import (
     apply_user_theme,
@@ -346,6 +351,31 @@ def _generate_dashboard_comment(
         else "なし"
     )
 
+    def _format_segment_line(row: Dict[str, Any]) -> str:
+        segment = row.get("segment", "不明")
+        pieces = []
+        avg_va = row.get("avg_va_per_min")
+        gap_val = row.get("avg_gap")
+        ach_val = row.get("ach_rate_pct")
+        roi_val = row.get("avg_roi_months")
+        if avg_va is not None and not pd.isna(avg_va):
+            pieces.append(f"VA/分 {float(avg_va):.1f}円")
+        if gap_val is not None and not pd.isna(gap_val):
+            pieces.append(f"差 {float(gap_val):+.1f}円")
+        if ach_val is not None and not pd.isna(ach_val):
+            pieces.append(f"達成率 {float(ach_val):.1f}%")
+        if roi_val is not None and not pd.isna(roi_val):
+            pieces.append(f"ROI {float(roi_val):.1f}月")
+        detail = " / ".join(pieces) if pieces else "データ不足"
+        return f"- {segment}: {detail}"
+
+    category_text = "\n".join(
+        [_format_segment_line(row) for row in insights.get("segment_category", [])[:3]]
+    ) or "- 情報不足"
+    customer_text = "\n".join(
+        [_format_segment_line(row) for row in insights.get("segment_customer", [])[:3]]
+    ) or "- 情報不足"
+
     prompt = (
         "あなたは製造業向けの経営コンサルタントです。"
         "以下のKPIとデータサンプル、AIが抽出した追加インサイトを踏まえ、"
@@ -357,6 +387,8 @@ def _generate_dashboard_comment(
         f"主要未達SKU:\n{top_gap_text}\n"
         f"異常検知サマリ:\n{anomaly_summary_text}\n"
         f"異常値サンプル:\n{anomaly_detail_text}\n"
+        f"カテゴリー別サマリ:\n{category_text}\n"
+        f"主要顧客別サマリ:\n{customer_text}\n"
         f"データサンプル:\n{sample}\n"
         "出力形式:\n"
         "1. 50文字以内の状況タイトル\n"
@@ -704,12 +736,126 @@ gap_df["roi_months"] = gap_df["price_improve"].replace({0: np.nan}) / gap_df["ga
 top_list = gap_df.sort_values("gap", ascending=False).head(20)
 top_cards = top_list.head(5)
 
+category_summary = summarize_segment_performance(df_view, req_rate, "category")
+customer_summary = summarize_segment_performance(df_view, req_rate, "major_customer")
+
 
 def _render_target_badge(col, text: str) -> None:
     col.markdown(
         f"<div class='metric-badge'><span style='background-color:#E0EEF4;padding:4px 10px;border-radius:999px;font-size:0.8em;'>🎯{text}</span></div>",
         unsafe_allow_html=True,
     )
+
+
+def _compose_segment_insight(summary_df: pd.DataFrame, label: str) -> str:
+    if summary_df is None or summary_df.empty:
+        return f"{label}別のデータがありません。Excelに{label}列を追加してください。"
+
+    df = summary_df.dropna(subset=["avg_va_per_min"]).copy()
+    if df.empty:
+        return f"{label}別の平均VA/分を計算できません。"
+
+    tol = 0.05
+    df = df.sort_values("avg_gap", ascending=False).reset_index(drop=True)
+    best = df.iloc[0]
+    diff_best = float(best.get("avg_gap", 0.0))
+    abs_best = abs(diff_best)
+
+    if abs_best <= tol:
+        first = (
+            f"{best['segment']}{label}は平均VA/分が{best['avg_va_per_min']:.1f}円で"
+            f"必要賃率とほぼ同水準です（達成率{best['ach_rate_pct']:.1f}%）。"
+        )
+    elif diff_best > 0:
+        first = (
+            f"{best['segment']}{label}は平均VA/分が{best['avg_va_per_min']:.1f}円で"
+            f"必要賃率を{abs_best:.1f}円上回っているため利益率が高い"
+            f"（達成率{best['ach_rate_pct']:.1f}%）。"
+        )
+    else:
+        first = (
+            f"{best['segment']}{label}は平均VA/分が{best['avg_va_per_min']:.1f}円で"
+            f"必要賃率を{abs_best:.1f}円下回っているため収益性に課題があります"
+            f"（達成率{best['ach_rate_pct']:.1f}%）。"
+        )
+
+    if len(df) == 1:
+        return first
+
+    negatives = df[df["avg_gap"] < -tol]
+    if not negatives.empty:
+        worst = negatives.sort_values("avg_gap").iloc[0]
+        diff_worst = float(abs(worst.get("avg_gap", 0.0)))
+        second = (
+            f"一方、{worst['segment']}{label}は平均VA/分が{worst['avg_va_per_min']:.1f}円で"
+            f"必要賃率を{diff_worst:.1f}円下回っています"
+        )
+        roi = worst.get("avg_roi_months")
+        if roi is not None and not pd.isna(roi):
+            second += f"（未達SKUの平均ROI回復期間は{float(roi):.1f}ヶ月）"
+        second += "。"
+        return f"{first} {second}"
+
+    if (df["avg_gap"] > tol).all():
+        return f"{first} 全てのセグメントが必要賃率をクリアしています。"
+
+    worst = df.sort_values("avg_gap").iloc[0]
+    diff_worst = abs(float(worst.get("avg_gap", 0.0)))
+    second = (
+        f"他のセグメントも必要賃率との差は最大でも{diff_worst:.1f}円に収まっています。"
+    )
+    return f"{first} {second}"
+
+
+def _render_segment_tab(
+    summary_df: pd.DataFrame, label: str, req_rate: float
+) -> None:
+    if summary_df is None or summary_df.empty:
+        st.info(f"{label}情報が不足しています。Excelに{label}列を追加してください。")
+        return
+
+    chart_df = summary_df.copy()
+    chart = (
+        alt.Chart(chart_df)
+        .mark_bar(color=PASTEL_ACCENT)
+        .encode(
+            x=alt.X("segment:N", sort="-y", title=label),
+            y=alt.Y("avg_va_per_min:Q", title="平均VA/分 (円)"),
+            tooltip=[
+                alt.Tooltip("segment:N", title=label),
+                alt.Tooltip("avg_va_per_min:Q", title="平均VA/分", format=".1f"),
+                alt.Tooltip("ach_rate_pct:Q", title="達成率", format=".1f"),
+                alt.Tooltip("avg_gap:Q", title="必要賃率差", format="+.1f"),
+            ],
+        )
+        .properties(height=360)
+    )
+    rule_df = pd.DataFrame({"req_rate": [req_rate]})
+    rule = alt.Chart(rule_df).mark_rule(color="#E07A5F", strokeDash=[6, 4]).encode(
+        y="req_rate:Q"
+    )
+    st.altair_chart(chart + rule, use_container_width=True)
+
+    display = summary_df.copy()
+    display = display.rename(columns={"segment": label, "sku_count": "SKU数"})
+    display["達成率"] = display["ach_rate_pct"].map(
+        lambda x: f"{x:.1f}%" if pd.notna(x) else "-"
+    )
+    display["平均VA/分"] = display["avg_va_per_min"].map(
+        lambda x: f"{x:.1f}" if pd.notna(x) else "-"
+    )
+    display["必要賃率差"] = display["avg_gap"].map(
+        lambda x: f"{x:+.1f}" if pd.notna(x) else "-"
+    )
+    display["平均ROI(月)"] = display["avg_roi_months"].map(
+        lambda x: "-" if pd.isna(x) else f"{x:.1f}"
+    )
+    display = display[
+        [label, "SKU数", "達成率", "平均VA/分", "必要賃率差", "平均ROI(月)"]
+    ]
+    st.dataframe(display, use_container_width=True)
+    st.caption("※ 平均ROI(月)は未達SKUのみを対象としたギャップ解消の目安です。")
+    st.info(_compose_segment_insight(summary_df, label))
 
 
 col1, col2, col3, col5 = st.columns([1, 1, 1, 1])
@@ -758,6 +904,8 @@ ai_insights = {
     "anomaly_summary": anomaly_summary_stats.to_dict("records"),
     "anomaly_records": anomaly_df.head(5).to_dict("records"),
     "dq_summary": {"missing": miss_count, "negative": out_count, "duplicate": dup_count},
+    "segment_category": category_summary.head(5).to_dict("records"),
+    "segment_customer": customer_summary.head(5).to_dict("records"),
 }
 
 st.subheader("AIコメント")
@@ -875,6 +1023,14 @@ if len(top5) > 0:
         st.success(f"{len(selected)}件をシナリオに反映しました")
 else:
     st.info("要対策SKUはありません。")
+
+st.subheader("セグメント分析（カテゴリー/顧客）")
+st.caption("平均VA/分と必要賃率との差、達成率、ROIをセグメント単位で比較します。")
+segment_tabs = st.tabs(["カテゴリー別", "主要顧客別"])
+with segment_tabs[0]:
+    _render_segment_tab(category_summary, "カテゴリー", req_rate)
+with segment_tabs[1]:
+    _render_segment_tab(customer_summary, "主要顧客", req_rate)
 
 tabs = st.tabs(["全体分布（散布図）", "時系列", "達成状況（棒/円）", "未達SKU（パレート）", "SKUテーブル", "付加価値/分分布"])
 
@@ -1093,6 +1249,8 @@ with tabs[4]:
     rename_map = {
         "product_no": "製品番号",
         "product_name": "製品名",
+        "category": "カテゴリー",
+        "major_customer": "主要顧客",
         "actual_unit_price": "実際売単価",
         "material_unit_cost": "材料原価",
         "minutes_per_unit": "分/個",
@@ -1110,7 +1268,7 @@ with tabs[4]:
         "rate_class": "達成分類",
     }
     ordered_cols = [
-        "製品番号","製品名","実際売単価","必要販売単価","必要販売単価差額","材料原価","粗利/個",
+        "製品番号","製品名","カテゴリー","主要顧客","実際売単価","必要販売単価","必要販売単価差額","材料原価","粗利/個",
         "分/個","日産数","日産合計(分)","付加価値(日産)","付加価値/分",
         "損益分岐付加価値単価","必要付加価値単価","必要賃率差","必要賃率達成","達成分類",
     ]

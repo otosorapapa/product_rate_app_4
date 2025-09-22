@@ -11,7 +11,7 @@ from standard_rate_core import (
     compute_rates,
     build_reverse_index,
 )
-from utils import compute_results
+from utils import compute_results, summarize_segment_performance
 
 
 def test_compute_rates_basic():
@@ -122,3 +122,25 @@ def test_compute_results_classification():
     )
     classes = res["rate_class"].tolist()
     assert classes == ["健康商品", "貧血商品", "出血商品"]
+
+
+def test_summarize_segment_performance_basic():
+    df = pd.DataFrame(
+        {
+            "product_no": ["P1", "P2", "P3", "P4"],
+            "product_name": ["Cake", "Pie", "Mochi", "Daifuku"],
+            "category": ["洋菓子", "洋菓子", "和菓子", "和菓子"],
+            "va_per_min": [160.0, 150.0, 120.0, 130.0],
+            "meets_required_rate": [True, True, False, False],
+            "required_selling_price": [0.0, 0.0, 420.0, 410.0],
+            "actual_unit_price": [0.0, 0.0, 360.0, 380.0],
+        }
+    )
+    summary = summarize_segment_performance(df, required_rate=140.0, segment_col="category")
+    assert list(summary["segment"]) == ["洋菓子", "和菓子"]
+    western = summary[summary["segment"] == "洋菓子"].iloc[0]
+    japanese = summary[summary["segment"] == "和菓子"].iloc[0]
+    assert math.isclose(western["ach_rate_pct"], 100.0, rel_tol=1e-6)
+    assert math.isclose(japanese["ach_rate_pct"], 0.0, rel_tol=1e-6)
+    assert japanese["avg_gap"] < 0
+    assert math.isclose(japanese["avg_roi_months"], 3.0, rel_tol=1e-6)

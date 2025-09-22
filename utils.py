@@ -5,6 +5,56 @@ import numpy as np
 import pandas as pd
 from typing import Dict, List, Any, Tuple, Optional, Callable
 
+
+CATEGORY_KEYWORDS = {
+    "洋菓子": [
+        "ケーキ",
+        "タルト",
+        "プリン",
+        "ショコラ",
+        "チョコ",
+        "シュー",
+        "パイ",
+        "ムース",
+        "マカロン",
+    ],
+    "和菓子": [
+        "大福",
+        "饅頭",
+        "餅",
+        "団子",
+        "羊羹",
+        "どら",
+        "最中",
+        "葛",
+        "栗",
+        "抹茶",
+    ],
+}
+
+
+def infer_category_from_name(name: Any) -> str:
+    """Infer a coarse product category from its name."""
+
+    if name in [None, ""] or (isinstance(name, float) and pd.isna(name)):
+        return "未設定"
+    text = str(name)
+    for category, keywords in CATEGORY_KEYWORDS.items():
+        if any(keyword in text for keyword in keywords):
+            return category
+    return "その他"
+
+
+def infer_major_customer(product_no: Any, fallback: Any = None) -> str:
+    """Derive a deterministic major customer label for sample data."""
+
+    if product_no in [None, ""] and fallback in [None, ""]:
+        return "未設定"
+    base = str(product_no if product_no not in [None, ""] else fallback)
+    customers = ["百貨店A社", "量販店B社", "通販C社"]
+    checksum = sum(ord(ch) for ch in base)
+    return customers[checksum % len(customers)]
+
 # --------------- Low-level helpers ---------------
 def _clean(s):
     if pd.isna(s):
@@ -175,6 +225,7 @@ def parse_products(xls: pd.ExcelFile, sheet_name: str="R6.12") -> Tuple[pd.DataF
         "リードタイム", "リードタイム (分/個)", "タクトタイム", "タクトタイム (分/個)",
         "日産製造数（個数） (個/日)", "日産数", "日産数 (個/日)",
         "備考", "備考 (任意)",
+        "カテゴリ", "カテゴリー", "主要顧客", "主要取引先", "メイン顧客",
     ]
     keep = [k for k in dict.fromkeys(keep_candidates) if k in data.columns]
     df = data[keep].copy()
@@ -189,7 +240,8 @@ def parse_products(xls: pd.ExcelFile, sheet_name: str="R6.12") -> Tuple[pd.DataF
 
     text_columns = {
         "製品№ (1)", "製品名 (大福生地)", "製品№", "製品番号", "製品番号 (コード)",
-        "製品№ (コード)", "製品名", "製品名 (名称)", "備考", "備考 (任意)"
+        "製品№ (コード)", "製品名", "製品名 (名称)", "備考", "備考 (任意)",
+        "カテゴリ", "カテゴリー", "主要顧客", "主要取引先", "メイン顧客",
     }
     for col in df.columns:
         if col not in text_columns:
@@ -232,6 +284,11 @@ def parse_products(xls: pd.ExcelFile, sheet_name: str="R6.12") -> Tuple[pd.DataF
         "粗利 (0)": "gp_per_unit_excel",
         "備考": "notes",
         "備考 (任意)": "notes",
+        "カテゴリ": "category",
+        "カテゴリー": "category",
+        "主要顧客": "major_customer",
+        "主要取引先": "major_customer",
+        "メイン顧客": "major_customer",
     }
     df = df.rename(columns={k:v for k,v in rename_map.items() if k in df.columns})
 
@@ -314,6 +371,18 @@ TEMPLATE_FIELD_GUIDE: List[Dict[str, Any]] = [
         "サンプル値": 800,
     },
     {
+        "Excel列名": "カテゴリー",
+        "説明": "製品の分類（和菓子・洋菓子など）。",
+        "単位/形式": "テキスト",
+        "サンプル値": "和菓子",
+    },
+    {
+        "Excel列名": "主要顧客",
+        "説明": "主要な販売先やチャネル。",
+        "単位/形式": "テキスト",
+        "サンプル値": "量販店B社",
+    },
+    {
         "Excel列名": "備考",
         "説明": "任意入力欄。ライン名や補足情報などがあれば記入します。",
         "単位/形式": "任意",
@@ -340,12 +409,14 @@ def generate_product_template() -> bytes:
         "原価（材料費）",
         "リードタイム",
         "日産製造数（個数）",
+        "カテゴリー",
+        "主要顧客",
         "備考",
     ]
-    product_units = ["コード", "名称", "円/個", "円/個", "分/個", "個/日", "任意"]
+    product_units = ["コード", "名称", "円/個", "円/個", "分/個", "個/日", "テキスト", "テキスト", "任意"]
     product_samples = [
-        ["P-1001", "苺大福", 320, 120, 4.5, 800, "既存ラインA"],
-        ["P-1002", "栗大福", 280, 110, 3.8, 600, "新規投入予定"],
+        ["P-1001", "苺大福", 320, 120, 4.5, 800, "和菓子", "量販店B社", "既存ラインA"],
+        ["P-1002", "栗大福", 280, 110, 3.8, 600, "和菓子", "百貨店A社", "新規投入予定"],
     ]
     product_rows = [product_header, product_units, *product_samples]
     template_df = pd.DataFrame(product_rows)
@@ -584,7 +655,7 @@ def compute_results(
         lambda v: classify_by_rate(v, req_rate, low_ratio, high_ratio)
     )
     out_cols = [
-        "product_no","product_name",
+        "product_no","product_name","category","major_customer",
         "actual_unit_price","material_unit_cost",
         "minutes_per_unit","daily_qty","daily_total_minutes",
         "gp_per_unit","daily_va","va_per_min",
@@ -593,6 +664,93 @@ def compute_results(
     ]
     out_cols = [c for c in out_cols if c in df.columns]
     return df[out_cols]
+
+
+def summarize_segment_performance(
+    df: pd.DataFrame, required_rate: float, segment_col: str
+) -> pd.DataFrame:
+    """Aggregate KPI metrics by the specified segment column."""
+
+    if df is None or df.empty or segment_col not in df.columns:
+        return pd.DataFrame(
+            columns=[
+                "segment",
+                "sku_count",
+                "ach_rate_pct",
+                "avg_va_per_min",
+                "avg_gap",
+                "avg_roi_months",
+            ]
+        )
+
+    req_rate = 0.0 if required_rate is None else float(required_rate)
+    work = df.copy()
+    seg_series = work[segment_col].copy()
+    seg_series = seg_series.fillna("未設定")
+    seg_series = seg_series.astype(str)
+    seg_series = seg_series.str.strip().replace({"": "未設定", "nan": "未設定"})
+    work[segment_col] = seg_series
+
+    work["va_per_min"] = pd.to_numeric(work.get("va_per_min"), errors="coerce")
+    if "meets_required_rate" in work.columns:
+        meets_series = work["meets_required_rate"]
+        if meets_series.dtype != bool:
+            work["meets_required_rate"] = (
+                pd.to_numeric(meets_series, errors="coerce").fillna(0) > 0
+            )
+    else:
+        work["meets_required_rate"] = work["va_per_min"] >= req_rate
+
+    work["gap_to_required"] = work["va_per_min"] - req_rate
+
+    required_price = pd.to_numeric(
+        work.get("required_selling_price"), errors="coerce"
+    )
+    actual_price = pd.to_numeric(work.get("actual_unit_price"), errors="coerce")
+    price_improve = required_price - actual_price
+    price_improve = price_improve.where(price_improve > 0)
+    gap_positive = req_rate - work["va_per_min"]
+    gap_positive = gap_positive.where(gap_positive > 0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        roi_months = price_improve / gap_positive
+    roi_months = roi_months.replace([np.inf, -np.inf], np.nan)
+    work["roi_months"] = roi_months
+
+    summary = (
+        work.groupby(segment_col, dropna=False)
+        .agg(
+            sku_count=(
+                "product_no",
+                lambda s: int(s.dropna().nunique() or s.notna().sum()),
+            ),
+            ach_rate=("meets_required_rate", "mean"),
+            avg_va_per_min=("va_per_min", "mean"),
+            avg_gap=("gap_to_required", "mean"),
+            avg_roi_months=(
+                "roi_months",
+                lambda s: float(s.dropna().mean()) if not s.dropna().empty else np.nan,
+            ),
+        )
+        .reset_index()
+    )
+
+    if summary.empty:
+        return pd.DataFrame(
+            columns=[
+                "segment",
+                "sku_count",
+                "ach_rate_pct",
+                "avg_va_per_min",
+                "avg_gap",
+                "avg_roi_months",
+            ]
+        )
+
+    summary = summary.rename(columns={segment_col: "segment"})
+    summary["ach_rate_pct"] = summary["ach_rate"].astype(float) * 100.0
+    summary = summary.drop(columns=["ach_rate"])
+    summary = summary.sort_values("avg_gap", ascending=False).reset_index(drop=True)
+    return summary
 
 
 def detect_quality_issues(df: pd.DataFrame) -> pd.DataFrame:
