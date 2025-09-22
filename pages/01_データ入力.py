@@ -5,10 +5,18 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 import streamlit as st
 import pandas as pd
 from utils import read_excel_safely, parse_hyochin, parse_products
-from components import render_stepper, render_sidebar_nav
+from components import (
+    render_onboarding,
+    render_page_tutorial,
+    render_stepper,
+    render_sidebar_nav,
+)
 
 st.title("① データ入力 & 取り込み")
-render_sidebar_nav()
+render_sidebar_nav(page_key="data")
+
+render_onboarding()
+render_page_tutorial("data")
 render_stepper(1)
 
 default_path = "data/sample.xlsx"
