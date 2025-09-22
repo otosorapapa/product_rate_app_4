@@ -11,6 +11,8 @@ from utils import (
     generate_product_template,
     get_product_template_guide,
     validate_product_dataframe,
+    infer_category_from_name,
+    infer_major_customer,
 )
 from components import (
     apply_user_theme,
@@ -59,8 +61,10 @@ if file is not None or "df_products_raw" not in st.session_state:
     if file is None:
         st.info("サンプルデータを使用します。")
         xls = read_excel_safely(default_path)
+        st.session_state["using_sample_data"] = True
     else:
         xls = read_excel_safely(file)
+        st.session_state["using_sample_data"] = False
 
     if xls is None:
         st.error("Excel 読込に失敗しました。ファイル形式・シート名をご確認ください。")
@@ -74,6 +78,23 @@ if file is not None or "df_products_raw" not in st.session_state:
 
     for w in (warn1 + warn2):
         st.warning(w)
+
+    if st.session_state.get("using_sample_data"):
+        df_products = df_products.copy()
+        if "category" not in df_products.columns or df_products["category"].isna().all():
+            df_products["category"] = df_products["product_name"].apply(
+                infer_category_from_name
+            )
+        if "major_customer" not in df_products.columns or df_products["major_customer"].isna().all():
+            df_products["major_customer"] = [
+                infer_major_customer(no, name)
+                for no, name in zip(
+                    df_products.get("product_no"), df_products.get("product_name")
+                )
+            ]
+        st.caption(
+            "※ サンプルデータには製品名から推定したカテゴリーと主要顧客を自動付与しています。"
+        )
 
     errors, val_warnings, detail_df = validate_product_dataframe(df_products)
     for msg in val_warnings:
@@ -135,6 +156,9 @@ with st.expander("新規製品を追加", expanded=False):
         material_unit_cost = st.number_input("材料原価", value=0.0, step=1.0)
         minutes_per_unit = st.number_input("分/個", value=0.0, step=0.1)
         daily_qty = st.number_input("日産数", value=0.0, step=1.0)
+        col_c, col_d = st.columns(2)
+        category = col_c.text_input("カテゴリー", "")
+        major_customer = col_d.text_input("主要顧客", "")
         submitted = st.form_submit_button("追加")
     if submitted:
         gp_per_unit = actual_unit_price - material_unit_cost
@@ -152,6 +176,8 @@ with st.expander("新規製品を追加", expanded=False):
             "gp_per_unit": gp_per_unit,
             "daily_va": daily_va,
             "va_per_min": va_per_min,
+            "category": category,
+            "major_customer": major_customer,
         }
         df_products = pd.concat([df_products, pd.DataFrame([new_row])], ignore_index=True)
         st.session_state["df_products_raw"] = df_products
