@@ -98,6 +98,16 @@ def _register_pastel_theme() -> None:
 
 _register_pastel_theme()
 
+METRIC_LABELS = {
+    "actual_unit_price": "実際売単価",
+    "material_unit_cost": "材料原価",
+    "minutes_per_unit": "分/個",
+    "daily_qty": "日産数",
+    "va_per_min": "付加価値/分",
+    "rate_gap_vs_required": "必要賃率差",
+    "required_selling_price": "必要販売単価",
+}
+
 st.markdown(
     """
     <style>
@@ -202,6 +212,29 @@ def _pct_change(previous: float, current: float) -> float:
     if current in (None,) or pd.isna(current):
         return np.nan
     return (current / previous - 1.0) * 100.0
+
+
+def _sku_to_str(value: Any) -> str:
+    """Normalize product numbers for consistent dictionary keys."""
+
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return "nan"
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+    if isinstance(value, float) and float(value).is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _format_number(value: Any) -> str:
+    """Format numeric values for concise display in anomaly prompts."""
+
+    if value is None or pd.isna(value):
+        return "N/A"
+    val = float(value)
+    if abs(val) >= 1000:
+        return f"{val:,.0f}"
+    return f"{val:,.2f}"
 
 
 def _format_delta(value: float, suffix: str) -> str:
@@ -518,6 +551,7 @@ if "df_products_raw" not in st.session_state or st.session_state["df_products_ra
     st.stop()
 
 df_raw_all = st.session_state["df_products_raw"]
+st.session_state.setdefault("anomaly_review", {})
 excluded_skus = st.session_state.get("dq_exclude_skus", [])
 df_products_raw = df_raw_all[~df_raw_all["product_no"].isin(excluded_skus)].copy()
 dq_df = detect_quality_issues(df_products_raw)
@@ -864,7 +898,23 @@ with st.sidebar.expander("KPI目標設定", expanded=False):
 target_req_rate = st.session_state["target_req_rate"]
 target_ach_rate = st.session_state["target_ach_rate"]
 
-anomaly_df = detect_anomalies(df_view)
+anomaly_all_df = detect_anomalies(df_view)
+review_state = st.session_state.get("anomaly_review", {})
+if not anomaly_all_df.empty:
+    key_series = anomaly_all_df["product_no"].apply(_sku_to_str) + "::" + anomaly_all_df["metric"].astype(str)
+    anomaly_all_df = anomaly_all_df.assign(key=key_series)
+    anomaly_all_df["decision"] = anomaly_all_df["key"].map(lambda k: review_state.get(k, {}).get("decision"))
+    anomaly_all_df["note"] = anomaly_all_df["key"].map(lambda k: review_state.get(k, {}).get("note"))
+    anomaly_all_df["corrected_value"] = anomaly_all_df["key"].map(
+        lambda k: review_state.get(k, {}).get("corrected_value")
+    )
+    anomaly_all_df["last_decided_at"] = anomaly_all_df["key"].map(
+        lambda k: review_state.get(k, {}).get("timestamp")
+    )
+    anomaly_df = anomaly_all_df[anomaly_all_df["decision"] != "exception"].copy()
+else:
+    anomaly_df = anomaly_all_df
+
 if not anomaly_df.empty:
     anomaly_summary_stats = (
         anomaly_df.groupby("metric")
@@ -1058,7 +1108,9 @@ ai_insights = {
     if not top_list.empty
     else [],
     "anomaly_summary": anomaly_summary_stats.to_dict("records"),
-    "anomaly_records": anomaly_df.head(5).to_dict("records"),
+    "anomaly_records": anomaly_df.sort_values("severity", ascending=False).head(5).to_dict("records")
+    if not anomaly_df.empty
+    else [],
     "dq_summary": {"missing": miss_count, "negative": out_count, "duplicate": dup_count},
     "segment_category": category_summary.head(5).to_dict("records"),
     "segment_customer": customer_summary.head(5).to_dict("records"),
@@ -1096,18 +1148,22 @@ else:
 
 st.subheader("異常値ハイライト")
 if anomaly_df.empty:
-    st.success("統計的な異常値は検出されませんでした。")
+    if anomaly_all_df.empty:
+        st.success("統計的な異常値は検出されませんでした。")
+    else:
+        st.info("検出された異常値はすべて市場価格の変更として例外扱いされています。下部のレビューで再評価できます。")
 else:
-    highlight = anomaly_df.head(3)
-    cols = st.columns(len(highlight))
-    for col, row in zip(cols, highlight.to_dict("records")):
-        direction = "上振れ" if row.get("direction") == "high" else "下振れ"
-        val_txt = "N/A" if pd.isna(row.get("value")) else f"{row['value']:.2f}"
-        col.metric(
-            f"{row.get('product_name', '不明')} ({row.get('metric', '-')})",
-            val_txt,
-            delta=f"{direction} z≈{row.get('severity', 0):.1f}",
-        )
+    highlight = anomaly_df.sort_values("severity", ascending=False).head(3)
+    if not highlight.empty:
+        cols = st.columns(len(highlight))
+        for col, row in zip(cols, highlight.to_dict("records")):
+            direction = "上振れ" if row.get("direction") == "high" else "下振れ"
+            val_txt = "N/A" if pd.isna(row.get("value")) else f"{row['value']:.2f}"
+            col.metric(
+                f"{row.get('product_name', '不明')} ({row.get('metric', '-')})",
+                val_txt,
+                delta=f"{direction} z≈{row.get('severity', 0):.1f}",
+            )
 
     if not anomaly_summary_stats.empty:
         summary_df = anomaly_summary_stats.rename(
@@ -1115,7 +1171,12 @@ else:
         )
         st.dataframe(summary_df, use_container_width=True)
 
-    detail_df = anomaly_df.head(20).rename(
+    detail_source = (
+        anomaly_df.sort_values("severity", ascending=False)
+        .head(20)
+        .drop(columns=["key", "decision", "note", "corrected_value", "last_decided_at"], errors="ignore")
+    )
+    detail_df = detail_source.rename(
         columns={
             "product_no": "製品番号",
             "product_name": "製品名",
@@ -1130,6 +1191,250 @@ else:
     )
     with st.expander("異常値詳細 (上位20件)", expanded=False):
         st.dataframe(detail_df, use_container_width=True)
+
+if not anomaly_all_df.empty:
+    with st.expander("異常値レビュー / 処置", expanded=not anomaly_df.empty):
+        review_candidates = anomaly_all_df.sort_values("severity", ascending=False).head(20)
+        if review_candidates.empty:
+            st.caption("現在レビュー対象の異常値はありません。")
+        else:
+            records = review_candidates.to_dict("records")
+            options = ["未判定", "市場価格の変更 (Yes)", "誤入力を修正する (No)"]
+            decisions = []
+            with st.form("anomaly_review_form"):
+                for idx, row in enumerate(records):
+                    key = row["key"]
+                    metric_label = METRIC_LABELS.get(row.get("metric"), row.get("metric"))
+                    product_no = row.get("product_no")
+                    product_no_display = _sku_to_str(product_no)
+                    product_name = row.get("product_name") or "不明"
+                    value = row.get("value")
+                    median_val = row.get("median")
+                    ratio = None
+                    if (
+                        value is not None
+                        and median_val is not None
+                        and not pd.isna(value)
+                        and not pd.isna(median_val)
+                        and median_val != 0
+                    ):
+                        ratio = float(value) / float(median_val)
+                    row["ratio"] = ratio
+                    ratio_txt = f"{ratio:.1f}倍" if ratio is not None else "中央値情報なし"
+                    severity = row.get("severity")
+                    severity_txt = "N/A" if severity is None or pd.isna(severity) else f"{float(severity):.1f}"
+                    direction = row.get("direction")
+                    direction_txt = "上振れ" if direction == "high" else "下振れ"
+                    median_txt = _format_number(median_val)
+                    value_txt = _format_number(value)
+                    question = (
+                        f"製品番号{product_no_display}（{product_name}）の{metric_label}が"
+                        f"{median_txt}に対して{value_txt}（{ratio_txt}）です。市場価格の変更（Yes/No）？"
+                    )
+                    row["question"] = question
+                    st.markdown(f"**{product_no_display}｜{product_name}**")
+                    st.caption(
+                        f"{metric_label}: 現在値 {value_txt} / 中央値 {median_txt}｜{direction_txt}｜Z≈{severity_txt}"
+                    )
+                    existing = review_state.get(key, {})
+                    default_index = 0
+                    if existing.get("decision") == "exception":
+                        default_index = 1
+                    elif existing.get("decision") == "corrected":
+                        default_index = 2
+                    choice = st.radio(
+                        question,
+                        options=options,
+                        index=default_index,
+                        horizontal=True,
+                        key=f"decision_{key}",
+                    )
+                    corrected_value = None
+                    if choice == options[2]:
+                        default_value = existing.get("corrected_value", value)
+                        if default_value is None or pd.isna(default_value):
+                            default_value = (
+                                median_val if median_val is not None and not pd.isna(median_val) else 0.0
+                            )
+                        step = max(abs(float(default_value)) * 0.01, 0.01)
+                        corrected_value = st.number_input(
+                            f"訂正後の値（{metric_label}） - {product_no_display}",
+                            value=float(default_value),
+                            step=float(step),
+                            format="%.3f",
+                            key=f"corrected_{key}",
+                        )
+                    note = st.text_input(
+                        f"メモ（任意） - {product_no_display}",
+                        value=existing.get("note", ""),
+                        key=f"note_{key}",
+                    )
+                    decisions.append((key, choice, corrected_value, note, row))
+                    if idx < len(records) - 1:
+                        st.markdown("---")
+                submitted = st.form_submit_button("レビュー結果を保存")
+
+            if submitted:
+                review_map = dict(review_state)
+                df_full = st.session_state["df_products_raw"].copy()
+                product_no_keys = (
+                    df_full["product_no"].apply(_sku_to_str)
+                    if "product_no" in df_full.columns
+                    else None
+                )
+                dataset_changed = False
+                decision_changed = False
+
+                def _revert_previous(record: Dict[str, Any]) -> None:
+                    nonlocal dataset_changed
+                    if (
+                        not record
+                        or record.get("decision") != "corrected"
+                        or record.get("original_value") is None
+                        or product_no_keys is None
+                    ):
+                        return
+                    metric_prev = record.get("metric")
+                    if metric_prev not in df_full.columns:
+                        return
+                    sku_prev = _sku_to_str(record.get("product_no"))
+                    mask_prev = product_no_keys == sku_prev
+                    if mask_prev.any():
+                        df_full.loc[mask_prev, metric_prev] = record.get("original_value")
+                        dataset_changed = True
+
+                for key, choice, corrected_value, note, row in decisions:
+                    existing = review_state.get(key)
+                    if choice == options[0]:
+                        if key in review_map:
+                            _revert_previous(existing)
+                            del review_map[key]
+                            decision_changed = True
+                        continue
+
+                    record = {
+                        "decision": "exception" if choice == options[1] else "corrected",
+                        "product_no": row.get("product_no"),
+                        "product_no_display": _sku_to_str(row.get("product_no")),
+                        "product_name": row.get("product_name"),
+                        "metric": row.get("metric"),
+                        "metric_label": METRIC_LABELS.get(row.get("metric"), row.get("metric")),
+                        "median": None if pd.isna(row.get("median")) else float(row.get("median")),
+                        "severity": None if pd.isna(row.get("severity")) else float(row.get("severity")),
+                        "direction": row.get("direction"),
+                        "note": note,
+                        "timestamp": datetime.now().isoformat(timespec="seconds"),
+                        "question": row.get("question"),
+                    }
+                    ratio_val = row.get("ratio")
+                    if ratio_val is not None and not pd.isna(ratio_val):
+                        record["ratio_vs_median"] = float(ratio_val)
+                    if (
+                        existing
+                        and existing.get("decision") == "corrected"
+                        and existing.get("original_value") is not None
+                    ):
+                        record["original_value"] = existing.get("original_value")
+                    else:
+                        value_now = row.get("value")
+                        record["original_value"] = (
+                            None if pd.isna(value_now) else float(value_now)
+                        )
+
+                    if choice == options[1]:
+                        _revert_previous(existing)
+                        review_map[key] = record
+                        decision_changed = True
+                        continue
+
+                    if corrected_value is None:
+                        continue
+                    corrected_numeric = float(corrected_value)
+                    record["corrected_value"] = corrected_numeric
+                    metric = row.get("metric")
+                    if product_no_keys is not None and metric in df_full.columns:
+                        sku_key = _sku_to_str(row.get("product_no"))
+                        mask = product_no_keys == sku_key
+                        if mask.any():
+                            df_full.loc[mask, metric] = corrected_numeric
+                            dataset_changed = True
+                    review_map[key] = record
+                    decision_changed = True
+
+                if decision_changed:
+                    st.session_state["anomaly_review"] = review_map
+                    if dataset_changed:
+                        st.session_state["df_products_raw"] = df_full
+                    st.success("レビュー結果を保存しました。")
+                    st.rerun()
+                else:
+                    st.info("変更はありませんでした。")
+
+history_state = st.session_state.get("anomaly_review", {})
+if history_state:
+    history_records = []
+    for key, info in history_state.items():
+        history_records.append(
+            {
+                "decision": info.get("decision"),
+                "製品番号": info.get("product_no_display")
+                or _sku_to_str(info.get("product_no")),
+                "製品名": info.get("product_name"),
+                "指標": info.get("metric_label")
+                or METRIC_LABELS.get(info.get("metric"), info.get("metric")),
+                "元の値": info.get("original_value"),
+                "訂正値": info.get("corrected_value"),
+                "中央値": info.get("median"),
+                "中央値比": info.get("ratio_vs_median"),
+                "逸脱度": info.get("severity"),
+                "判定日時": info.get("timestamp"),
+                "メモ": info.get("note"),
+            }
+        )
+    history_df = pd.DataFrame(history_records)
+    if not history_df.empty:
+        history_df = history_df.sort_values("判定日時", ascending=False)
+
+        def _prepare_history(df: pd.DataFrame) -> pd.DataFrame:
+            if df.empty:
+                return df
+            df = df.copy()
+            df["中央値比"] = df["中央値比"].apply(
+                lambda v: f"{float(v):.2f}倍" if v is not None and not pd.isna(v) else "-"
+            )
+            df["元の値"] = df["元の値"].apply(_format_number)
+            df["訂正値"] = df["訂正値"].apply(
+                lambda v: "-" if v is None or pd.isna(v) else _format_number(v)
+            )
+            df["中央値"] = df["中央値"].apply(_format_number)
+            df["逸脱度"] = df["逸脱度"].apply(
+                lambda v: "-" if v is None or pd.isna(v) else f"{float(v):.1f}"
+            )
+            return df
+
+        exceptions_history = history_df[history_df["decision"] == "exception"].copy()
+        corrections_history = history_df[history_df["decision"] == "corrected"].copy()
+
+        if not exceptions_history.empty:
+            cols = ["製品番号", "製品名", "指標", "元の値", "中央値", "中央値比", "逸脱度", "判定日時", "メモ"]
+            with st.expander("例外として扱う異常値", expanded=False):
+                st.dataframe(_prepare_history(exceptions_history)[cols], use_container_width=True)
+
+        if not corrections_history.empty:
+            cols = [
+                "製品番号",
+                "製品名",
+                "指標",
+                "元の値",
+                "訂正値",
+                "中央値",
+                "中央値比",
+                "逸脱度",
+                "判定日時",
+                "メモ",
+            ]
+            with st.expander("訂正済みの異常値", expanded=False):
+                st.dataframe(_prepare_history(corrections_history)[cols], use_container_width=True)
 
 st.divider()
 
