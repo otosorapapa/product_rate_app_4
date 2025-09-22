@@ -4,7 +4,14 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import streamlit as st
 import pandas as pd
-from utils import read_excel_safely, parse_hyochin, parse_products
+from utils import (
+    read_excel_safely,
+    parse_hyochin,
+    parse_products,
+    generate_product_template,
+    get_product_template_guide,
+    validate_product_dataframe,
+)
 from components import (
     render_onboarding,
     render_page_tutorial,
@@ -18,6 +25,27 @@ render_sidebar_nav(page_key="data")
 render_onboarding()
 render_page_tutorial("data")
 render_stepper(1)
+
+st.subheader("Excelテンプレート")
+st.markdown(
+    "テンプレートには必須項目の説明とサンプル値を記載しています。"
+    " 自社データを入力する前にダウンロードし、列名と単位を変更しないようご注意ください。"
+)
+
+guide_df = get_product_template_guide()
+st.table(guide_df)
+
+template_bytes = generate_product_template()
+st.download_button(
+    "📄 製品マスタ入力テンプレートをダウンロード",
+    data=template_bytes,
+    file_name="product_master_template.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
+
+st.caption("※『標賃』シートにもサンプル値を用意しています。必要に応じて実績値へ置き換えてください。")
+
+st.divider()
 
 default_path = "data/sample.xlsx"
 file = st.file_uploader("Excelをアップロード（未指定ならサンプルを使用）", type=["xlsx"])
@@ -41,6 +69,21 @@ if file is not None or "df_products_raw" not in st.session_state:
 
     for w in (warn1 + warn2):
         st.warning(w)
+
+    errors, val_warnings, detail_df = validate_product_dataframe(df_products)
+    for msg in val_warnings:
+        st.warning(msg)
+    for msg in errors:
+        st.error(msg)
+
+    if not detail_df.empty:
+        with st.expander("検知されたデータ品質アラートの詳細", expanded=bool(errors)):
+            st.dataframe(detail_df, use_container_width=True)
+
+    if errors:
+        st.stop()
+    elif not val_warnings:
+        st.success("データ品質チェックを通過しました。")
 
     st.session_state["sr_params"] = sr_params
     st.session_state["df_products_raw"] = df_products
