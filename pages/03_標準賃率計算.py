@@ -6,6 +6,8 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from components import (
+    apply_user_theme,
+    render_help_button,
     render_onboarding,
     render_page_tutorial,
     render_stepper,
@@ -40,8 +42,11 @@ from standard_rate_core import (
     generate_pdf,
 )
 
+apply_user_theme()
+
 st.title("③ 標準賃率 計算/感度分析")
 render_sidebar_nav(page_key="standard_rate")
+render_help_button("standard_rate")
 
 render_onboarding()
 render_page_tutorial("standard_rate")
@@ -51,20 +56,22 @@ st.markdown(
     """
     <style>
     .sr-section {
-        background: linear-gradient(145deg, rgba(38, 46, 74, 0.88), rgba(18, 24, 42, 0.92));
-        border-radius: 22px;
-        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: var(--app-surface);
+        border-radius: 20px;
+        border: 1px solid var(--app-border);
         padding: 1.4rem 1.6rem;
         margin-bottom: 1.5rem;
-        box-shadow: 0 24px 48px rgba(8, 12, 28, 0.45);
+        box-shadow: 0 20px 36px rgba(0, 0, 0, 0.08);
+        color: var(--app-text);
     }
     .sr-section h4 {
-        color: #f4f6ff;
+        color: var(--app-text);
         font-weight: 700;
-        margin-bottom: 0.2rem;
+        margin-bottom: 0.3rem;
     }
-    .sr-section p, .sr-section .sr-helper {
-        color: rgba(238, 241, 255, 0.75);
+    .sr-section p,
+    .sr-section .sr-helper {
+        color: var(--app-muted);
         margin-bottom: 0.6rem;
     }
     .sr-section div[data-baseweb="input"] > input,
@@ -72,52 +79,56 @@ st.markdown(
     .sr-section select,
     .sr-section input[type="number"],
     .sr-section input[type="text"] {
-        background-color: rgba(12, 17, 32, 0.85) !important;
-        color: #f5f7ff !important;
+        background-color: var(--app-surface) !important;
+        color: var(--app-text) !important;
         border-radius: 12px;
-        border: 1px solid rgba(132, 146, 255, 0.35);
+        border: 1px solid var(--app-border);
         font-weight: 600;
     }
     .sr-section label {
-        color: #f0f2ff !important;
+        color: var(--app-text) !important;
         font-weight: 600 !important;
     }
     .sr-section .stSlider > div > div > div[data-testid="stTickBar"] {
-        background-color: rgba(132, 146, 255, 0.35);
+        background-color: var(--app-border);
     }
     .sr-section .stSlider > div > div > div > div {
-        background: linear-gradient(90deg, rgba(132, 146, 255, 0.9), rgba(111, 180, 255, 0.9));
+        background: linear-gradient(90deg, var(--app-accent), rgba(255, 255, 255, 0));
     }
     .sr-section .stSlider [data-testid="stThumbValue"] > div {
-        color: #0a1024 !important;
+        color: var(--app-text) !important;
         font-weight: 700;
     }
     div[data-testid="metric-container"] {
-        background: linear-gradient(135deg, rgba(32, 42, 68, 0.8), rgba(18, 24, 42, 0.9));
+        background: var(--app-surface);
         border-radius: 20px;
-        border: 1px solid rgba(255, 255, 255, 0.08);
+        border: 1px solid var(--app-border);
         padding: 1.2rem;
-        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 18px 36px rgba(10, 15, 30, 0.55);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 18px 32px rgba(0, 0, 0, 0.08);
     }
     div[data-testid="metric-container"] label {
-        color: rgba(226, 232, 255, 0.8) !important;
+        color: var(--app-muted) !important;
         font-weight: 600;
     }
     div[data-testid="metric-container"] > div:nth-child(2) {
-        color: #f6f8ff !important;
+        color: var(--app-text) !important;
         font-weight: 700;
     }
     .sr-metric-caption {
         margin-top: -0.6rem;
-        font-size: 0.76rem;
-        color: rgba(226, 232, 255, 0.68);
+        font-size: var(--app-font-small);
+        color: var(--app-muted);
     }
     .sr-highlight {
-        background: rgba(120, 150, 255, 0.12);
+        background: var(--app-surface);
         border-radius: 16px;
-        border: 1px solid rgba(120, 150, 255, 0.25);
+        border: 1px solid var(--app-border);
         padding: 0.8rem 1rem;
-        color: rgba(235, 238, 255, 0.8);
+        color: var(--app-text);
+        box-shadow: 0 12px 28px rgba(0, 0, 0, 0.08);
+    }
+    .sr-highlight strong {
+        color: var(--app-accent);
     }
     </style>
     """,

@@ -2,6 +2,100 @@ from typing import Any, Dict, List, Optional
 
 import streamlit as st
 
+_DEFAULT_THEME_KEY = "標準（ブルー）"
+_DEFAULT_FONT_KEY = "ふつう"
+
+_THEME_PALETTES: Dict[str, Dict[str, str]] = {
+    "標準（ブルー）": {
+        "background": "#F4F7FA",
+        "surface": "#FFFFFF",
+        "text": "#1F2A44",
+        "accent": "#2F6776",
+        "border": "#CBD7E3",
+        "muted": "#5F6B8A",
+        "description": "やわらかなブルー基調の標準配色です。初めての方にも見やすく設計しています。",
+    },
+    "高コントラスト（濃紺×白）": {
+        "background": "#0F172A",
+        "surface": "#1F2937",
+        "text": "#F9FAFB",
+        "accent": "#F97316",
+        "border": "#4B5563",
+        "muted": "#E5E7EB",
+        "description": "暗い背景と明るい文字でコントラストを最大化し、小さな文字も読みやすくします。",
+    },
+    "あたたかいセピア": {
+        "background": "#F6F2EA",
+        "surface": "#FFFBF5",
+        "text": "#3F2F1E",
+        "accent": "#B8631B",
+        "border": "#E3D5C3",
+        "muted": "#7B6651",
+        "description": "目に優しい生成りカラー。長時間の閲覧でも疲れにくい落ち着いた配色です。",
+    },
+}
+
+_FONT_SCALE_OPTIONS: Dict[str, float] = {
+    "ふつう": 1.0,
+    "大きめ": 1.15,
+    "特大": 1.3,
+}
+
+_HELP_CONTENT: Dict[str, Dict[str, Any]] = {
+    "home": {
+        "title": "ホーム画面のヘルプ",
+        "intro": "アプリ全体の流れと主要な入口を確認できます。",
+        "steps": [
+            "左のナビゲーションから目的の画面を選択します。",
+            "最初に『① データ入力 & 取り込み』でExcelを読み込みましょう。",
+            "オンボーディングと画面チュートリアルで操作手順を確認できます。",
+        ],
+        "tips": [
+            "サイドバー下部の『表示設定』から文字サイズと配色を変更できます。",
+            "ガイドを閉じてもサイドバーの『👀 ガイドを再表示』でいつでも呼び出せます。",
+        ],
+    },
+    "data": {
+        "title": "データ入力画面のヘルプ",
+        "intro": "Excel原稿を取り込み、製品マスタを整備する画面です。",
+        "steps": [
+            "『Excelテンプレート』でフォーマットを確認し、必要に応じてダウンロードします。",
+            "ファイルをアップロードすると必須項目のチェックとクリーニングが自動で実行されます。",
+            "検出されたエラーは修正してから再アップロードしてください。警告のみの場合は次に進めます。",
+        ],
+        "tips": [
+            "検索ボックスで製品番号や名称を素早く絞り込みできます。",
+            "『新規製品を追加』フォームから不足しているSKUを直接入力できます。",
+        ],
+    },
+    "dashboard": {
+        "title": "ダッシュボード画面のヘルプ",
+        "intro": "シナリオ別のKPIやギャップを俯瞰する分析ハブです。",
+        "steps": [
+            "上部のシナリオ選択で比較したい前提条件を指定します。",
+            "KPIカードと要対策SKU表で必要賃率との差や優先度を確認します。",
+            "グラフのフィルターと描画ツールを使うと改善ポイントを共有しやすくなります。",
+        ],
+        "tips": [
+            "ダッシュボード画面右上の❓をクリックすると、各チャートの意味と使い方を確認できます。",
+            "サイドバーの『グラフ操作オプション』でガイド線やレンジスライダーの表示を切り替えられます。",
+        ],
+    },
+    "standard_rate": {
+        "title": "標準賃率計算画面のヘルプ",
+        "intro": "固定費や必要利益の前提を変えながら感度分析を行います。",
+        "steps": [
+            "A〜Cの入力セクションで費用や稼働時間の前提値を調整します。",
+            "右側のシナリオ管理で複数案を保存し、ダッシュボードと共有できます。",
+            "グラフと表は入力値を変えると即座に再計算されます。",
+        ],
+        "tips": [
+            "『PDF出力』で現在の前提条件と感度分析結果を資料として保存できます。",
+            "感度グラフの凡例をクリックすると特定指標のみを強調表示できます。",
+        ],
+    },
+}
+
 _ONBOARDING_STATE_KEY = "onboarding_dismissed"
 _PAGE_STATE_PREFIX = "tutorial_collapsed_"
 
@@ -85,6 +179,228 @@ _PAGE_TUTORIALS: Dict[str, Dict[str, Any]] = {
         "terms": ["標準賃率", "必要賃率", "シナリオ", "感度分析"],
     },
 }
+
+
+def _ensure_theme_state() -> None:
+    """Ensure theme-related options exist in :mod:`streamlit` session state."""
+
+    theme_key = st.session_state.get("ui_theme", _DEFAULT_THEME_KEY)
+    if theme_key not in _THEME_PALETTES:
+        theme_key = _DEFAULT_THEME_KEY
+    st.session_state["ui_theme"] = theme_key
+
+    font_key = st.session_state.get("ui_font_scale", _DEFAULT_FONT_KEY)
+    if font_key not in _FONT_SCALE_OPTIONS:
+        font_key = _DEFAULT_FONT_KEY
+    st.session_state["ui_font_scale"] = font_key
+
+
+def _build_theme_css(theme: Dict[str, str], font_scale: float) -> str:
+    """Return CSS for the selected theme and font scale."""
+
+    base_font_px = round(16 * font_scale, 2)
+    small_font_px = round(base_font_px * 0.85, 2)
+    return f"""
+    <style>
+    :root {{
+        --app-bg: {theme['background']};
+        --app-surface: {theme['surface']};
+        --app-text: {theme['text']};
+        --app-accent: {theme['accent']};
+        --app-border: {theme['border']};
+        --app-muted: {theme['muted']};
+        --app-font-base: {base_font_px}px;
+        --app-font-small: {small_font_px}px;
+    }}
+    html, body, [data-testid="stAppViewContainer"] {{
+        background-color: var(--app-bg);
+        color: var(--app-text);
+        font-size: var(--app-font-base);
+    }}
+    body {{
+        line-height: 1.6;
+    }}
+    h1 {{ font-size: calc(var(--app-font-base) * 1.7); }}
+    h2 {{ font-size: calc(var(--app-font-base) * 1.45); }}
+    h3 {{ font-size: calc(var(--app-font-base) * 1.25); }}
+    h1, h2, h3, h4, h5, h6 {{
+        color: var(--app-text);
+        font-weight: 700;
+    }}
+    p, label, span, li {{
+        color: var(--app-text);
+    }}
+    [data-testid="stHeader"] {{
+        background-color: var(--app-surface);
+        border-bottom: 1px solid var(--app-border);
+    }}
+    [data-testid="stSidebar"] {{
+        background-color: var(--app-surface);
+        border-right: 1px solid var(--app-border);
+    }}
+    [data-testid="stSidebar"] * {{
+        color: var(--app-text);
+    }}
+    [data-testid="stSidebar"] .stCaption,
+    [data-testid="stSidebar"] .stMarkdown p {{
+        color: var(--app-muted);
+    }}
+    .stCaption, caption {{
+        color: var(--app-muted) !important;
+        font-size: var(--app-font-small) !important;
+    }}
+    .stButton > button, .stDownloadButton > button {{
+        background: var(--app-accent);
+        color: #FFFFFF;
+        border: none;
+        border-radius: 999px;
+        padding: 0.65rem 1.4rem;
+        font-weight: 600;
+        font-size: calc(var(--app-font-base) * 0.95);
+    }}
+    .stButton > button:hover, .stDownloadButton > button:hover {{
+        filter: brightness(1.05);
+    }}
+    .stButton > button:focus-visible,
+    .stDownloadButton > button:focus-visible {{
+        outline: 3px solid var(--app-accent);
+        outline-offset: 2px;
+    }}
+    input, textarea, select {{
+        background-color: var(--app-surface);
+        color: var(--app-text);
+        border: 1px solid var(--app-border);
+        border-radius: 8px;
+    }}
+    input:focus-visible, textarea:focus-visible, select:focus-visible {{
+        outline: 2px solid var(--app-accent);
+        outline-offset: 1px;
+    }}
+    [data-testid="stMetric"] {{
+        background-color: var(--app-surface);
+        border: 1px solid var(--app-border);
+        border-radius: 18px;
+        padding: 0.8rem 1rem;
+        box-shadow: 0 8px 18px rgba(0, 0, 0, 0.08);
+    }}
+    [data-testid="stMetricLabel"],
+    [data-testid="stMetricValue"],
+    [data-testid="stMetricDelta"] {{
+        color: var(--app-text) !important;
+    }}
+    [data-testid="stMetricDelta"] span {{
+        font-weight: 600;
+    }}
+    [data-testid="stAppViewContainer"] .stAlert {{
+        border: 1px solid var(--app-border);
+        background-color: var(--app-surface);
+        color: var(--app-text);
+    }}
+    [data-testid="stExpander"] > div {{
+        border: 1px solid var(--app-border);
+        background-color: var(--app-surface);
+    }}
+    [data-testid="stExpander"] [data-testid="stMarkdownContainer"] p {{
+        color: var(--app-text);
+    }}
+    [data-testid="dataframe-container"] * {{
+        color: var(--app-text) !important;
+    }}
+    [data-testid="stTable"] th,
+    [data-testid="stTable"] td {{
+        color: var(--app-text);
+        border-color: var(--app-border);
+    }}
+    [data-testid="stAppViewContainer"] a {{
+        color: var(--app-accent);
+        font-weight: 600;
+    }}
+    </style>
+    """
+
+
+def apply_user_theme() -> None:
+    """Apply the active theme and font scale to the current Streamlit page."""
+
+    _ensure_theme_state()
+    theme_key = st.session_state["ui_theme"]
+    font_key = st.session_state["ui_font_scale"]
+    theme = _THEME_PALETTES.get(theme_key, _THEME_PALETTES[_DEFAULT_THEME_KEY])
+    font_scale = _FONT_SCALE_OPTIONS.get(font_key, _FONT_SCALE_OPTIONS[_DEFAULT_FONT_KEY])
+    css = _build_theme_css(theme, font_scale)
+    st.markdown(css, unsafe_allow_html=True)
+    st.session_state["_theme_css_injected"] = True
+
+
+def get_active_theme_palette() -> Dict[str, str]:
+    """Return the currently selected theme palette."""
+
+    _ensure_theme_state()
+    theme_key = st.session_state.get("ui_theme", _DEFAULT_THEME_KEY)
+    return _THEME_PALETTES.get(theme_key, _THEME_PALETTES[_DEFAULT_THEME_KEY]).copy()
+
+
+def render_help_button(page_key: str, *, align: str = "right") -> None:
+    """Render a modal help button tailored to ``page_key``."""
+
+    help_content = _HELP_CONTENT.get(page_key)
+    if help_content is None:
+        return
+
+    state_key = f"help_modal_open_{page_key}"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = False
+
+    if align == "left":
+        button_col, _ = st.columns([0.3, 0.7])
+    else:
+        _, button_col = st.columns([0.7, 0.3])
+
+    if button_col.button(
+        "❓ ヘルプ",
+        key=f"help_button_{page_key}",
+        use_container_width=True,
+        help="画面の使い方を表示します。",
+    ):
+        st.session_state[state_key] = True
+
+    if not st.session_state.get(state_key):
+        return
+
+    modal = getattr(st, "modal", None)
+    if callable(modal):
+        with modal(help_content["title"]):
+            st.markdown(f"**{help_content['intro']}**")
+
+            steps: List[str] = help_content.get("steps", [])
+            if steps:
+                steps_md = "\n".join(
+                    f"{idx}. {text}" for idx, text in enumerate(steps, start=1)
+                )
+                st.markdown(steps_md)
+
+            tips: List[str] = help_content.get("tips", [])
+            if tips:
+                st.markdown("**ヒント**")
+                for tip in tips:
+                    st.markdown(f"- {tip}")
+
+            if st.button(
+                "閉じる",
+                key=f"help_close_{page_key}",
+                use_container_width=True,
+            ):
+                st.session_state[state_key] = False
+    else:  # pragma: no cover - fallback for older Streamlit versions
+        with st.expander(help_content["title"], expanded=True):
+            st.markdown(f"**{help_content['intro']}**")
+            for idx, text in enumerate(help_content.get("steps", []), start=1):
+                st.markdown(f"{idx}. {text}")
+            if help_content.get("tips"):
+                st.markdown("**ヒント**")
+                for tip in help_content["tips"]:
+                    st.markdown(f"- {tip}")
+        st.session_state[state_key] = False
 
 
 def render_onboarding() -> None:
@@ -175,6 +491,10 @@ def render_stepper(current_step: int) -> None:
 def render_sidebar_nav(*, page_key: Optional[str] = None) -> None:
     """Render sidebar navigation links and tutorial shortcuts."""
 
+    _ensure_theme_state()
+    if not st.session_state.get("_theme_css_injected"):
+        apply_user_theme()
+
     st.sidebar.header("ナビゲーション")
     st.sidebar.page_link("app.py", label="ホーム", icon="🏠")
     st.sidebar.page_link("pages/01_データ入力.py", label="① データ入力", icon="📥")
@@ -200,5 +520,27 @@ def render_sidebar_nav(*, page_key: Optional[str] = None) -> None:
             st.sidebar.markdown("**主要用語**")
             for term in terms:
                 st.sidebar.caption(f"{term}: {_GLOSSARY[term]}")
+
+    st.sidebar.divider()
+    st.sidebar.subheader("表示設定")
+    theme_options = list(_THEME_PALETTES.keys())
+    selected_theme = st.sidebar.selectbox(
+        "配色テーマ",
+        theme_options,
+        key="ui_theme",
+        help="背景色とアクセントカラーの組み合わせを切り替えます。視認性が高いテーマを選んでください。",
+    )
+    st.sidebar.caption(_THEME_PALETTES[selected_theme]["description"])
+
+    font_options = list(_FONT_SCALE_OPTIONS.keys())
+    selected_font = st.sidebar.radio(
+        "文字サイズ",
+        font_options,
+        key="ui_font_scale",
+        help="本文・見出し・テーブルをまとめて拡大します。大きいほど読みやすくなります。",
+    )
+    st.sidebar.caption(
+        f"現在の文字サイズ: **{selected_font}** ／ 選択は同一ブラウザ内で保持されます。"
+    )
 
     st.sidebar.caption(_ONBOARDING_EFFECT)
