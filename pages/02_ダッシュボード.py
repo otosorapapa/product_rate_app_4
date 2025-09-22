@@ -1285,29 +1285,30 @@ if not anomaly_all_df.empty:
                 dataset_changed = False
                 decision_changed = False
 
-                def _revert_previous(record: Dict[str, Any]) -> None:
-                    nonlocal dataset_changed
+                def _revert_previous(record: Dict[str, Any]) -> bool:
                     if (
                         not record
                         or record.get("decision") != "corrected"
                         or record.get("original_value") is None
                         or product_no_keys is None
                     ):
-                        return
+                        return False
                     metric_prev = record.get("metric")
                     if metric_prev not in df_full.columns:
-                        return
+                        return False
                     sku_prev = _sku_to_str(record.get("product_no"))
                     mask_prev = product_no_keys == sku_prev
                     if mask_prev.any():
                         df_full.loc[mask_prev, metric_prev] = record.get("original_value")
-                        dataset_changed = True
+                        return True
+                    return False
 
                 for key, choice, corrected_value, note, row in decisions:
                     existing = review_state.get(key)
                     if choice == options[0]:
                         if key in review_map:
-                            _revert_previous(existing)
+                            if _revert_previous(existing):
+                                dataset_changed = True
                             del review_map[key]
                             decision_changed = True
                         continue
@@ -1342,7 +1343,8 @@ if not anomaly_all_df.empty:
                         )
 
                     if choice == options[1]:
-                        _revert_previous(existing)
+                        if _revert_previous(existing):
+                            dataset_changed = True
                         review_map[key] = record
                         decision_changed = True
                         continue
