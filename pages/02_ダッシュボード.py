@@ -212,6 +212,71 @@ def _format_delta(value: float, suffix: str) -> str:
     return f"{value:+.1f}{suffix}"
 
 
+SIMULATION_PRESETS: Dict[str, Dict[str, Any]] = {
+    "販売価格+5%": {
+        "adjustments": {"quick_price": 5, "quick_ct": 0, "quick_material": 0},
+        "description": "すべての製品で販売単価を一律5%引き上げるケース",
+    },
+    "労働時間-10%": {
+        "adjustments": {"quick_price": 0, "quick_ct": -10, "quick_material": 0},
+        "description": "1製品当たりの製造時間を10%圧縮するケース",
+    },
+    "材料費-3%": {
+        "adjustments": {"quick_price": 0, "quick_ct": 0, "quick_material": -3},
+        "description": "原材料コストを平均で3%削減するケース",
+    },
+}
+
+
+def apply_simulation_preset(label: str) -> None:
+    """Apply predefined what-if adjustments to quick simulation controls."""
+
+    preset = SIMULATION_PRESETS.get(label)
+    if not preset:
+        return
+    adjustments = preset.get("adjustments", {})
+    for key, value in adjustments.items():
+        st.session_state[key] = value
+    st.session_state["active_simulation"] = label
+
+
+def _detect_simulation_label(qp: int, qc: int, qm: int) -> str:
+    """Return a human friendly label for the current quick adjustments."""
+
+    for label, preset in SIMULATION_PRESETS.items():
+        adjustments = preset.get("adjustments", {})
+        if (
+            adjustments.get("quick_price", 0) == qp
+            and adjustments.get("quick_ct", 0) == qc
+            and adjustments.get("quick_material", 0) == qm
+        ):
+            return label
+    if qp == 0 and qc == 0 and qm == 0:
+        return "ベース"
+    return "カスタム設定"
+
+
+def _format_fermi_estimate(delta_daily_va: float, working_days: float, scenario_label: str) -> str:
+    """Build a short Fermi style estimate text for annual profit impact."""
+
+    if working_days is None or working_days <= 0:
+        return "稼働日数の情報が不足しているため年間影響を概算できません。"
+    if delta_daily_va is None or not np.isfinite(delta_daily_va):
+        return "シミュレーション結果から日次付加価値の変化を取得できませんでした。"
+    if abs(delta_daily_va) < 1:
+        return "日次付加価値の変化がごく小さいため年間影響は限定的と推定されます。"
+
+    annual_change = float(delta_daily_va) * float(working_days)
+    lower = abs(annual_change) * 0.8
+    upper = abs(annual_change) * 1.2
+    sign = "増加" if annual_change >= 0 else "減少"
+    scenario = scenario_label or "カスタム設定"
+    return (
+        f"{scenario} を適用すると日次の付加価値(粗利相当)が {delta_daily_va:+,.0f} 円変化 → "
+        f"年間利益インパクトは{sign}方向に概ね {lower:,.0f} ～ {upper:,.0f} 円と推定されます。"
+    )
+
+
 def _upsert_trend_record(
     *,
     scenario: str,
@@ -419,6 +484,7 @@ selected_scenarios = st.multiselect(
 st.session_state.setdefault("quick_price", 0)
 st.session_state.setdefault("quick_ct", 0)
 st.session_state.setdefault("quick_material", 0)
+st.session_state.setdefault("active_simulation", "ベース")
 st.session_state.setdefault(
     "plotly_draw_tools", ["drawline", "drawrect", "drawopenpath", "drawcircle", "eraseshape"]
 )
@@ -445,6 +511,7 @@ def reset_quick_params() -> None:
     st.session_state["quick_price"] = 0
     st.session_state["quick_ct"] = 0
     st.session_state["quick_material"] = 0
+    st.session_state["active_simulation"] = "ベース"
 
 if "df_products_raw" not in st.session_state or st.session_state["df_products_raw"] is None or len(st.session_state["df_products_raw"]) == 0:
     st.info("先に『① データ入力 & 取り込み』でデータを準備してください。")
@@ -553,46 +620,131 @@ mask &= df["minutes_per_unit"].fillna(0.0).between(mpu_min, mpu_max)
 mask &= df["va_per_min"].replace([np.inf,-np.inf], np.nan).fillna(0.0).between(vapm_min, vapm_max)
 df_view_filtered = df[mask].copy()
 
-# Quick simulation toggles
-qcol1, qcol2, qcol3, qcol4 = st.columns([1,1,1,0.6])
+# Quick simulation presets & toggles
+st.markdown("#### 🎯 What-ifシミュレーション")
+preset_cols = st.columns(len(SIMULATION_PRESETS))
+for col, (label, preset) in zip(preset_cols, SIMULATION_PRESETS.items()):
+    desc = preset.get("description")
+    if col.button(label, help=desc):
+        apply_simulation_preset(label)
+        st.rerun()
+
+qcol1, qcol2, qcol3, qcol4 = st.columns([1, 1, 1, 0.8])
 with qcol1:
     st.radio(
-        "価格", options=[0,3,5,10], format_func=lambda x: f"+{x}%", key="quick_price", horizontal=True
+        "販売価格",
+        options=[0, 3, 5, 10],
+        format_func=lambda x: f"+{x}%",
+        key="quick_price",
+        horizontal=True,
     )
 with qcol2:
     st.radio(
-        "CT", options=[0,-5,-10], format_func=lambda x: f"{x}%", key="quick_ct", horizontal=True
+        "労働時間",
+        options=[0, -5, -10],
+        format_func=lambda x: f"{x}%",
+        key="quick_ct",
+        horizontal=True,
     )
 with qcol3:
     st.radio(
-        "材料", options=[0,-3,-5], format_func=lambda x: f"{x}%", key="quick_material", horizontal=True
+        "材料費",
+        options=[0, -3, -5],
+        format_func=lambda x: f"{x}%",
+        key="quick_material",
+        horizontal=True,
     )
 with qcol4:
-    st.button("Undo", on_click=reset_quick_params)
+    st.button("リセット", on_click=reset_quick_params)
 
 qp = st.session_state["quick_price"]
 qc = st.session_state["quick_ct"]
 qm = st.session_state["quick_material"]
+active_label = _detect_simulation_label(qp, qc, qm)
+st.session_state["active_simulation"] = active_label
+preset_desc = SIMULATION_PRESETS.get(active_label, {}).get("description", "")
+summary_text = f"販売価格{qp:+d}%｜労働時間{qc:+d}%｜材料費{qm:+d}%"
+if active_label == "ベース":
+    st.caption(f"シミュレーション: ベースライン（{summary_text}）")
+else:
+    detail = f"｜{preset_desc}" if preset_desc else ""
+    st.caption(f"シミュレーション: {active_label}（{summary_text}）{detail}")
+
 df_base = df_view_filtered.copy()
-base_ach_rate = (df_base["meets_required_rate"].mean()*100.0) if len(df_base)>0 else 0.0
-base_avg_vapm = df_base["va_per_min"].replace([np.inf,-np.inf], np.nan).dropna().mean() if "va_per_min" in df_base else 0.0
+base_ach_rate = (df_base["meets_required_rate"].mean() * 100.0) if len(df_base) > 0 else 0.0
+base_avg_vapm = (
+    df_base["va_per_min"].replace([np.inf, -np.inf], np.nan).dropna().mean()
+    if "va_per_min" in df_base
+    else np.nan
+)
 df_sim = df_base.copy()
 if qp:
-    df_sim["actual_unit_price"] *= (1 + qp/100.0)
+    df_sim["actual_unit_price"] *= (1 + qp / 100.0)
 if qc:
-    df_sim["minutes_per_unit"] *= (1 + qc/100.0)
+    df_sim["minutes_per_unit"] *= (1 + qc / 100.0)
 if qm:
-    df_sim["material_unit_cost"] *= (1 + qm/100.0)
+    df_sim["material_unit_cost"] *= (1 + qm / 100.0)
 df_sim["gp_per_unit"] = df_sim["actual_unit_price"] - df_sim["material_unit_cost"]
 df_sim["daily_total_minutes"] = df_sim["minutes_per_unit"] * df_sim["daily_qty"]
 df_sim["daily_va"] = df_sim["gp_per_unit"] * df_sim["daily_qty"]
-with np.errstate(divide='ignore', invalid='ignore'):
+with np.errstate(divide="ignore", invalid="ignore"):
     df_sim["va_per_min"] = df_sim["daily_va"] / df_sim["daily_total_minutes"]
 df_view = compute_results(df_sim, be_rate, req_rate, delta_low, delta_high)
-ach_rate = (df_view["meets_required_rate"].mean()*100.0) if len(df_view)>0 else 0.0
-avg_vapm = df_view["va_per_min"].replace([np.inf,-np.inf], np.nan).dropna().mean() if "va_per_min" in df_view else 0.0
-if qp or qc or qm:
-    st.caption(f"Quick試算中: 価格{qp:+d}%, CT{qc:+d}%, 材料{qm:+d}%")
+ach_rate = (df_view["meets_required_rate"].mean() * 100.0) if len(df_view) > 0 else 0.0
+avg_vapm = (
+    df_view["va_per_min"].replace([np.inf, -np.inf], np.nan).dropna().mean()
+    if "va_per_min" in df_view
+    else np.nan
+)
+
+avg_vapm = float(avg_vapm) if avg_vapm is not None else np.nan
+base_avg_vapm = float(base_avg_vapm) if base_avg_vapm is not None else np.nan
+if pd.isna(avg_vapm):
+    avg_vapm = np.nan
+if pd.isna(base_avg_vapm):
+    base_avg_vapm = np.nan
+
+base_daily_va_total = (
+    float(np.nansum(pd.to_numeric(df_base["daily_va"], errors="coerce")))
+    if "daily_va" in df_base
+    else 0.0
+)
+sim_daily_va_total = (
+    float(np.nansum(pd.to_numeric(df_view["daily_va"], errors="coerce")))
+    if "daily_va" in df_view
+    else 0.0
+)
+daily_delta = sim_daily_va_total - base_daily_va_total
+ach_delta = ach_rate - base_ach_rate
+vapm_delta = (
+    avg_vapm - base_avg_vapm
+    if np.isfinite(avg_vapm) and np.isfinite(base_avg_vapm)
+    else np.nan
+)
+working_days = float(base_params.get("working_days", DEFAULT_PARAMS["working_days"]))
+
+st.markdown("##### 📊 感度分析ハイライト")
+mcol1, mcol2, mcol3 = st.columns(3)
+mcol1.metric(
+    "必要賃率達成率",
+    f"{ach_rate:.1f}%" if np.isfinite(ach_rate) else "N/A",
+    delta=f"{ach_delta:+.1f}pt" if np.isfinite(ach_delta) else "N/A",
+)
+mcol2.metric(
+    "平均VA/分",
+    f"{avg_vapm:.2f}円" if np.isfinite(avg_vapm) else "N/A",
+    delta=f"{vapm_delta:+.2f}円" if np.isfinite(vapm_delta) else "N/A",
+)
+mcol3.metric(
+    "日次付加価値",
+    f"{sim_daily_va_total:,.0f}円" if np.isfinite(sim_daily_va_total) else "N/A",
+    delta=f"{daily_delta:+,.0f}円" if np.isfinite(daily_delta) else "N/A",
+)
+
+if active_label == "ベース" and not any([qp, qc, qm]):
+    st.caption("シミュレーション条件を変更すると年間インパクトの概算を表示します。")
+else:
+    st.info(f"フェルミ推定: {_format_fermi_estimate(daily_delta, working_days, active_label)}")
 
 trend_history = st.session_state.get("monthly_trend")
 if trend_history is None:
@@ -875,11 +1027,14 @@ with col5:
         unsafe_allow_html=True,
     )
 
+kpi_alias = st.session_state.get("active_simulation", "施策A")
+if kpi_alias == "ベース":
+    kpi_alias = "施策A"
 kpi_data = [
-    {"scenario": "ベース", "KPI": "必要賃率達成SKU比率", "value": base_ach_rate},
-    {"scenario": "ベース", "KPI": "平均 付加価値/分", "value": base_avg_vapm},
-    {"scenario": "施策A", "KPI": "必要賃率達成SKU比率", "value": ach_rate},
-    {"scenario": "施策A", "KPI": "平均 付加価値/分", "value": avg_vapm},
+    {"scenario": "ベース", "display": "ベース", "KPI": "必要賃率達成SKU比率", "value": base_ach_rate},
+    {"scenario": "ベース", "display": "ベース", "KPI": "平均 付加価値/分", "value": base_avg_vapm},
+    {"scenario": "施策A", "display": kpi_alias, "KPI": "必要賃率達成SKU比率", "value": ach_rate},
+    {"scenario": "施策A", "display": kpi_alias, "KPI": "平均 付加価値/分", "value": avg_vapm},
 ]
 kpi_df = pd.DataFrame(kpi_data)
 kpi_df = kpi_df[kpi_df["scenario"].isin(selected_scenarios)]
@@ -887,13 +1042,14 @@ fig_kpi = px.bar(
     kpi_df,
     x="KPI",
     y="value",
-    color="scenario",
+    color="display",
     barmode="group",
     color_discrete_sequence=PASTEL_PALETTE,
 )
 fig_kpi.update_traces(opacity=0.85)
 fig_kpi.update_yaxes(gridcolor="#D7E2EA")
 fig_kpi.update_xaxes(gridcolor="#D7E2EA")
+fig_kpi.update_layout(legend_title_text="シナリオ")
 fig_kpi = _apply_plotly_theme(fig_kpi, legend_bottom=True)
 st.plotly_chart(fig_kpi, use_container_width=True, config=_build_plotly_config())
 
