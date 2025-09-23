@@ -2,8 +2,19 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
+from datetime import date, datetime, timedelta
+
 import streamlit as st
 import pandas as pd
+from data_integrations import (
+    IntegrationConfig,
+    SUPPORTED_ACCOUNTING_APPS,
+    SUPPORTED_POS_SYSTEMS,
+    apply_transaction_summary_to_products,
+    extract_transaction_period,
+    load_transactions_for_sync,
+    summarize_transactions,
+)
 from utils import (
     read_excel_safely,
     parse_hyochin,
@@ -127,6 +138,10 @@ else:
 if "current_scenario" not in st.session_state:
     st.session_state["current_scenario"] = "ベース"
 
+st.session_state.setdefault("external_sync_history", [])
+st.session_state.setdefault("external_sync_last_summary", [])
+st.session_state.setdefault("external_sync_last_transactions", None)
+
 st.caption(f"適用中シナリオ: {st.session_state['current_scenario']}")
 
 c1, c2, c3 = st.columns(3)
@@ -183,5 +198,214 @@ with st.expander("新規製品を追加", expanded=False):
         st.session_state["df_products_raw"] = df_products
         st.success("製品を追加しました。")
         st.rerun()
+
+st.divider()
+st.subheader("生産・販売システムとのデータ連携")
+st.caption(
+    "弥生会計やfreeeなどの会計ソフト、POSシステムから売上・原価データを同期し、"
+    "最新の製品指標を自動反映できます。"
+)
+
+feedback = st.session_state.pop("external_sync_feedback", None)
+if feedback:
+    level = feedback.get("level", "info")
+    message = feedback.get("message", "")
+    display = getattr(st, level, st.info)
+    if message:
+        display(message)
+
+latest_summary_records = st.session_state.get("external_sync_last_summary") or []
+if latest_summary_records:
+    latest_summary_df = pd.DataFrame(latest_summary_records)
+    if not latest_summary_df.empty:
+        st.markdown("**直近の同期結果（SKU別集計）**")
+        st.dataframe(latest_summary_df, use_container_width=True)
+
+latest_transactions = st.session_state.get("external_sync_last_transactions")
+if isinstance(latest_transactions, pd.DataFrame) and not latest_transactions.empty:
+    with st.expander("直近の取り込み明細を表示", expanded=False):
+        st.dataframe(latest_transactions, use_container_width=True)
+
+tab_api, tab_csv = st.tabs(["API連携", "CSV自動取り込み"])
+
+with tab_api:
+    st.write(
+        "APIトークンを登録するとサンプルAPIから指定期間の売上・原価データを取得できます。"
+        " 本番環境では各システムのAPIクレデンシャルを設定してください。"
+    )
+    api_system_label = st.radio(
+        "連携するシステムの種別",
+        options=("会計ソフト", "POS"),
+        horizontal=True,
+        key="api_system_type",
+    )
+    api_source_type = "accounting" if api_system_label == "会計ソフト" else "pos"
+    api_vendor_options = (
+        list(SUPPORTED_ACCOUNTING_APPS.keys())
+        if api_source_type == "accounting"
+        else list(SUPPORTED_POS_SYSTEMS.keys())
+    )
+    api_vendor = st.selectbox("サービスを選択", api_vendor_options, key="api_vendor")
+    api_token = st.text_input("APIトークン (任意)", value="", type="password")
+    today = date.today()
+    default_start = today - timedelta(days=6)
+    api_period = st.date_input(
+        "同期期間",
+        value=(default_start, today),
+        key="api_period",
+    )
+    if isinstance(api_period, (tuple, list)):
+        api_start, api_end = api_period
+    else:
+        api_start = api_end = api_period
+    api_frequency_label = st.selectbox(
+        "同期頻度",
+        options=["日次", "週次", "月次"],
+        index=0 if api_source_type == "pos" else 2,
+        key="api_frequency",
+    )
+    if st.button("APIから同期", key="api_sync_button"):
+        config = IntegrationConfig(
+            source_type=api_source_type,
+            vendor=api_vendor,
+            credential_key=api_token or None,
+            schedule={"日次": "daily", "週次": "weekly", "月次": "monthly"}.get(
+                api_frequency_label, "daily"
+            ),
+        )
+        try:
+            transactions = load_transactions_for_sync(
+                config, start_date=api_start, end_date=api_end
+            )
+        except FileNotFoundError:
+            st.error(
+                "サンプルAPIレスポンスが見つかりません。CSV取り込みを使用してください。"
+            )
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            summary = summarize_transactions(transactions)
+            if summary.empty:
+                st.warning("同期対象データが見つかりませんでした。期間を見直してください。")
+            else:
+                updated_df = apply_transaction_summary_to_products(
+                    df_products,
+                    summary,
+                    vendor=api_vendor,
+                    synced_at=datetime.now(),
+                )
+                st.session_state["df_products_raw"] = updated_df
+                st.session_state["external_sync_last_summary"] = summary.to_dict(
+                    "records"
+                )
+                st.session_state["external_sync_last_transactions"] = (
+                    transactions.head(500).reset_index(drop=True)
+                )
+                period_start, period_end = extract_transaction_period(transactions)
+                st.session_state["external_sync_history"].append(
+                    {
+                        "synced_at": datetime.now().isoformat(timespec="seconds"),
+                        "mode": "API",
+                        "source_type": api_system_label,
+                        "vendor": api_vendor,
+                        "records": int(len(transactions)),
+                        "updated_products": int(summary["product_no"].nunique()),
+                        "period_start": period_start.isoformat()
+                        if period_start
+                        else None,
+                        "period_end": period_end.isoformat() if period_end else None,
+                        "frequency": api_frequency_label,
+                    }
+                )
+                st.session_state["external_sync_feedback"] = {
+                    "level": "success",
+                    "message": f"{api_vendor}から{int(summary['product_no'].nunique())}件のSKUを同期しました。",
+                }
+                st.rerun()
+
+with tab_csv:
+    st.write(
+        "フォルダに出力されたCSVを指定すると、自動でヘッダーを解析し日次・月次の更新を取り込めます。"
+    )
+    csv_system_label = st.radio(
+        "取り込み元の種別",
+        options=("会計ソフト", "POS"),
+        horizontal=True,
+        key="csv_system_type",
+    )
+    csv_source_type = "accounting" if csv_system_label == "会計ソフト" else "pos"
+    csv_vendor_options = (
+        list(SUPPORTED_ACCOUNTING_APPS.keys())
+        if csv_source_type == "accounting"
+        else list(SUPPORTED_POS_SYSTEMS.keys())
+    )
+    csv_vendor = st.selectbox("取込フォーマット", csv_vendor_options, key="csv_vendor")
+    csv_file = st.file_uploader(
+        "売上・原価CSVをアップロード", type=["csv"], key="csv_file"
+    )
+    csv_frequency_label = st.selectbox(
+        "更新頻度",
+        options=["日次", "週次", "月次"],
+        index=0 if csv_source_type == "pos" else 2,
+        key="csv_frequency",
+    )
+    if st.button("CSVを取り込む", key="csv_sync_button", disabled=csv_file is None):
+        if csv_file is None:
+            st.error("CSVファイルを選択してください。")
+        else:
+            config = IntegrationConfig(source_type=csv_source_type, vendor=csv_vendor)
+            try:
+                transactions = load_transactions_for_sync(config, csv_file=csv_file)
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                summary = summarize_transactions(transactions)
+                if summary.empty:
+                    st.warning("CSVに同期対象データが含まれていませんでした。")
+                else:
+                    updated_df = apply_transaction_summary_to_products(
+                        df_products,
+                        summary,
+                        vendor=csv_vendor,
+                        synced_at=datetime.now(),
+                    )
+                    st.session_state["df_products_raw"] = updated_df
+                    st.session_state["external_sync_last_summary"] = summary.to_dict(
+                        "records"
+                    )
+                    st.session_state["external_sync_last_transactions"] = (
+                        transactions.head(500).reset_index(drop=True)
+                    )
+                    period_start, period_end = extract_transaction_period(transactions)
+                    st.session_state["external_sync_history"].append(
+                        {
+                            "synced_at": datetime.now().isoformat(timespec="seconds"),
+                            "mode": "CSV",
+                            "source_type": csv_system_label,
+                            "vendor": csv_vendor,
+                            "records": int(len(transactions)),
+                            "updated_products": int(summary["product_no"].nunique()),
+                            "period_start": period_start.isoformat()
+                            if period_start
+                            else None,
+                            "period_end": period_end.isoformat()
+                            if period_end
+                            else None,
+                            "frequency": csv_frequency_label,
+                        }
+                    )
+                    st.session_state["external_sync_feedback"] = {
+                        "level": "success",
+                        "message": f"CSVから{int(summary['product_no'].nunique())}件のSKUを更新しました。",
+                    }
+                    st.rerun()
+
+history = st.session_state.get("external_sync_history", [])
+if history:
+    history_df = pd.DataFrame(history)
+    if not history_df.empty:
+        history_df = history_df.sort_values("synced_at", ascending=False)
+        st.markdown("**同期履歴**")
+        st.dataframe(history_df, use_container_width=True)
 
 st.success("保存しました。上部のナビから『ダッシュボード』へ進んでください。")
