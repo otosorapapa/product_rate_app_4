@@ -511,21 +511,25 @@ def _simulate_scenario(
     else:
         ach_rate = float("nan")
 
-    if "va_per_min" in df_result and not df_result.empty:
-        avg_vapm = df_result["va_per_min"].replace([np.inf, -np.inf], np.nan).dropna().mean()
-        avg_vapm = float(avg_vapm) if pd.notna(avg_vapm) else float("nan")
-    else:
-        avg_vapm = float("nan")
+    avg_vapm = _safe_series_mean(df_result.get("va_per_min"))
+    avg_gap = _safe_series_mean(df_result.get("rate_gap_vs_required"))
+    avg_required_price = _safe_series_mean(df_result.get("required_selling_price"))
 
     if "daily_va" in df_result:
-        daily_total = float(np.nansum(pd.to_numeric(df_result["daily_va"], errors="coerce")))
+        daily_total = float(
+            np.nansum(pd.to_numeric(df_result["daily_va"], errors="coerce"))
+        )
     else:
         daily_total = float("nan")
 
     return df_result, {
         "ach_rate": ach_rate,
-        "avg_vapm": avg_vapm,
+        "avg_vapm": float(avg_vapm) if np.isfinite(avg_vapm) else float("nan"),
         "daily_va_total": daily_total,
+        "avg_gap": float(avg_gap) if np.isfinite(avg_gap) else float("nan"),
+        "avg_required_price": float(avg_required_price)
+        if np.isfinite(avg_required_price)
+        else float("nan"),
     }
 
 
@@ -538,10 +542,22 @@ def _sanitize_metrics(metrics: Dict[str, float]) -> Dict[str, float]:
     avg = metrics.get("avg_vapm", float("nan"))
     if not np.isfinite(avg):
         avg = np.nan
-    daily = metrics.get("daily_va_total", 0.0)
+    daily = metrics.get("daily_va_total", float("nan"))
     if not np.isfinite(daily):
-        daily = 0.0
-    return {"ach_rate": ach, "avg_vapm": avg, "daily_va_total": daily}
+        daily = np.nan
+    avg_gap = metrics.get("avg_gap", float("nan"))
+    if not np.isfinite(avg_gap):
+        avg_gap = np.nan
+    avg_required_price = metrics.get("avg_required_price", float("nan"))
+    if not np.isfinite(avg_required_price):
+        avg_required_price = np.nan
+    return {
+        "ach_rate": ach,
+        "avg_vapm": avg,
+        "daily_va_total": daily,
+        "avg_gap": avg_gap,
+        "avg_required_price": avg_required_price,
+    }
 
 
 def _format_adjustment_summary(adjustments: Dict[str, Any]) -> str:
@@ -552,6 +568,39 @@ def _format_adjustment_summary(adjustments: Dict[str, Any]) -> str:
     qv = int(adjustments.get("quick_volume", 0))
     qm = int(adjustments.get("quick_material", 0))
     return f"価格{qp:+d}%・リードタイム{qc:+d}%・生産量{qv:+d}%・材料{qm:+d}%"
+
+
+def _summarize_scenario_effect(
+    *,
+    ach_delta: float,
+    vapm_delta: float,
+    daily_delta: float,
+    annual_delta: float,
+    req_price_delta: float,
+    gap_delta: float,
+) -> str:
+    """Build a one-line summary describing KPI deltas for the active scenario."""
+
+    pieces: List[str] = []
+    if np.isfinite(ach_delta) and abs(ach_delta) >= 0.05:
+        pieces.append(f"達成率 {ach_delta:+.1f}pt")
+    if np.isfinite(vapm_delta) and abs(vapm_delta) >= 0.01:
+        pieces.append(f"平均VA/分 {vapm_delta:+.2f}円")
+    if np.isfinite(daily_delta) and abs(daily_delta) >= 100.0:
+        pieces.append(f"日次付加価値 {daily_delta:+,.0f}円")
+    if np.isfinite(annual_delta) and abs(annual_delta) >= 1000.0:
+        pieces.append(f"年間利益 {annual_delta / 10000:+,.1f}万円")
+    if np.isfinite(req_price_delta) and abs(req_price_delta) >= 1.0:
+        direction = "低下" if req_price_delta < 0 else "上昇"
+        pieces.append(
+            f"平均必要販売単価 {abs(req_price_delta):,.0f}円{direction}"
+        )
+    if np.isfinite(gap_delta) and abs(gap_delta) >= 0.01:
+        direction = "改善" if gap_delta >= 0 else "悪化"
+        pieces.append(
+            f"必要賃率との差 {abs(gap_delta):.2f}円/分{direction}"
+        )
+    return " / ".join(pieces)
 
 
 def _safe_series_mean(series: Optional[pd.Series]) -> float:
@@ -583,10 +632,20 @@ def _analyze_driver_impacts(
 ) -> Tuple[pd.DataFrame, List[str]]:
     """Simulate each adjustment factor independently and summarise KPI deltas."""
 
-    base_daily = float(base_metrics.get("daily_va_total", 0.0) or 0.0)
-    base_avg_va = _safe_series_mean(df_base.get("va_per_min"))
-    base_avg_gap = _safe_series_mean(df_base.get("rate_gap_vs_required"))
-    base_avg_req_price = _safe_series_mean(df_base.get("required_selling_price"))
+    base_daily = float(base_metrics.get("daily_va_total", float("nan")))
+    if not np.isfinite(base_daily):
+        base_daily = float("nan")
+    base_avg_va = float(base_metrics.get("avg_vapm", float("nan")))
+    if not np.isfinite(base_avg_va):
+        base_avg_va = float("nan")
+    base_avg_gap = float(base_metrics.get("avg_gap", float("nan")))
+    if not np.isfinite(base_avg_gap):
+        base_avg_gap = float("nan")
+    base_avg_req_price = float(
+        base_metrics.get("avg_required_price", float("nan"))
+    )
+    if not np.isfinite(base_avg_req_price):
+        base_avg_req_price = float("nan")
 
     driver_configs = [
         ("販売価格", price_pct, "price"),
@@ -631,22 +690,33 @@ def _analyze_driver_impacts(
         )
         driver_metrics_clean = _sanitize_metrics(driver_metrics)
 
-        daily_delta = driver_metrics_clean["daily_va_total"] - base_daily
+        daily_candidate = driver_metrics_clean.get("daily_va_total", float("nan"))
+        daily_delta = daily_candidate - base_daily
         if not np.isfinite(daily_delta):
             daily_delta = float("nan")
         annual_delta = float("nan")
         if valid_working_days and np.isfinite(daily_delta):
             annual_delta = daily_delta * float(working_days)
 
-        avg_va = _safe_series_mean(df_driver.get("va_per_min"))
-        avg_gap = _safe_series_mean(df_driver.get("rate_gap_vs_required"))
-        avg_req_price = _safe_series_mean(df_driver.get("required_selling_price"))
+        avg_va = float(driver_metrics_clean.get("avg_vapm", float("nan")))
+        avg_gap = float(driver_metrics_clean.get("avg_gap", float("nan")))
+        avg_req_price = float(
+            driver_metrics_clean.get("avg_required_price", float("nan"))
+        )
 
-        avg_va_delta = avg_va - base_avg_va if np.isfinite(avg_va) else float("nan")
-        avg_gap_delta = avg_gap - base_avg_gap if np.isfinite(avg_gap) else float("nan")
+        avg_va_delta = (
+            avg_va - base_avg_va
+            if np.isfinite(avg_va) and np.isfinite(base_avg_va)
+            else float("nan")
+        )
+        avg_gap_delta = (
+            avg_gap - base_avg_gap
+            if np.isfinite(avg_gap) and np.isfinite(base_avg_gap)
+            else float("nan")
+        )
         req_price_delta = (
             avg_req_price - base_avg_req_price
-            if np.isfinite(avg_req_price)
+            if np.isfinite(avg_req_price) and np.isfinite(base_avg_req_price)
             else float("nan")
         )
 
@@ -659,8 +729,8 @@ def _analyze_driver_impacts(
                 if np.isfinite(annual_delta)
                 else float("nan"),
                 "平均VA/分差(円)": avg_va_delta,
-                "必要賃率ギャップ差(円/分)": avg_gap_delta,
-                "必要販売単価差(円)": req_price_delta,
+                "平均必要賃率差(円/分)": avg_gap_delta,
+                "平均必要販売単価差(円)": req_price_delta,
             }
         )
 
@@ -687,7 +757,7 @@ def _analyze_driver_impacts(
             if np.isfinite(avg_gap_delta):
                 direction = "改善" if avg_gap_delta >= 0 else "悪化"
                 parts.append(
-                    f"必要賃率ギャップが{abs(avg_gap_delta):.2f}円/分{direction}"
+                    f"必要賃率との差が{abs(avg_gap_delta):.2f}円/分{direction}"
                 )
             if np.isfinite(req_price_delta):
                 direction = "低下" if req_price_delta < 0 else "上昇"
@@ -710,8 +780,8 @@ def _analyze_driver_impacts(
                 "日次付加価値差(円)",
                 "年間利益差(万円)",
                 "平均VA/分差(円)",
-                "必要賃率ギャップ差(円/分)",
-                "必要販売単価差(円)",
+                "平均必要賃率差(円/分)",
+                "平均必要販売単価差(円)",
             ]
         )
 
@@ -1265,6 +1335,8 @@ base_metrics_clean = _sanitize_metrics(base_metrics)
 base_ach_rate = base_metrics_clean["ach_rate"]
 base_avg_vapm = base_metrics_clean["avg_vapm"]
 base_daily_va_total = base_metrics_clean["daily_va_total"]
+base_avg_gap = base_metrics_clean.get("avg_gap", float("nan"))
+base_avg_req_price = base_metrics_clean.get("avg_required_price", float("nan"))
 
 df_view, active_metrics = _simulate_scenario(
     scenario_template,
@@ -1281,15 +1353,58 @@ active_metrics_clean = _sanitize_metrics(active_metrics)
 ach_rate = active_metrics_clean["ach_rate"]
 avg_vapm = active_metrics_clean["avg_vapm"]
 sim_daily_va_total = active_metrics_clean["daily_va_total"]
+avg_gap = active_metrics_clean.get("avg_gap", float("nan"))
+avg_req_price = active_metrics_clean.get("avg_required_price", float("nan"))
 
-daily_delta = sim_daily_va_total - base_daily_va_total
-ach_delta = ach_rate - base_ach_rate
+daily_delta = (
+    sim_daily_va_total - base_daily_va_total
+    if np.isfinite(sim_daily_va_total) and np.isfinite(base_daily_va_total)
+    else float("nan")
+)
+ach_delta = (
+    ach_rate - base_ach_rate
+    if np.isfinite(ach_rate) and np.isfinite(base_ach_rate)
+    else float("nan")
+)
 vapm_delta = (
     avg_vapm - base_avg_vapm
     if np.isfinite(avg_vapm) and np.isfinite(base_avg_vapm)
-    else np.nan
+    else float("nan")
 )
-working_days = float(base_params.get("working_days", DEFAULT_PARAMS["working_days"]))
+gap_delta_metric = (
+    avg_gap - base_avg_gap
+    if np.isfinite(avg_gap) and np.isfinite(base_avg_gap)
+    else float("nan")
+)
+req_price_delta_metric = (
+    avg_req_price - base_avg_req_price
+    if np.isfinite(avg_req_price) and np.isfinite(base_avg_req_price)
+    else float("nan")
+)
+
+raw_working_days = base_params.get("working_days", DEFAULT_PARAMS["working_days"])
+try:
+    working_days = float(raw_working_days)
+except (TypeError, ValueError):
+    working_days = float("nan")
+if not np.isfinite(working_days) or working_days <= 0:
+    working_days = float("nan")
+
+annual_base_va = (
+    base_daily_va_total * working_days
+    if np.isfinite(base_daily_va_total) and np.isfinite(working_days)
+    else float("nan")
+)
+annual_sim_va = (
+    sim_daily_va_total * working_days
+    if np.isfinite(sim_daily_va_total) and np.isfinite(working_days)
+    else float("nan")
+)
+annual_delta = (
+    annual_sim_va - annual_base_va
+    if np.isfinite(annual_sim_va) and np.isfinite(annual_base_va)
+    else float("nan")
+)
 
 scenario_results: Dict[str, Dict[str, Any]] = {
     "ベース": {
@@ -1384,6 +1499,8 @@ for scen_name in selected_scenarios:
     ach_val = float(metrics.get("ach_rate", np.nan))
     avg_val = float(metrics.get("avg_vapm", np.nan))
     daily_val = float(metrics.get("daily_va_total", np.nan))
+    avg_req_price_val = float(metrics.get("avg_required_price", np.nan))
+    avg_gap_val = float(metrics.get("avg_gap", np.nan))
     comparison_records.append(
         {
             "シナリオ": scen_name,
@@ -1404,6 +1521,14 @@ for scen_name in selected_scenarios:
             "日次付加価値差分(円)": 0.0
             if scen_name == "ベース" and np.isfinite(base_daily)
             else _delta_or_nan(daily_val, base_daily),
+            "平均必要販売単価(円)": avg_req_price_val,
+            "平均必要販売単価差分(円)": 0.0
+            if scen_name == "ベース" and np.isfinite(base_avg_req_price)
+            else _delta_or_nan(avg_req_price_val, base_avg_req_price),
+            "平均必要賃率差(円/分)": avg_gap_val,
+            "平均必要賃率差分(円/分)": 0.0
+            if scen_name == "ベース" and np.isfinite(base_avg_gap)
+            else _delta_or_nan(avg_gap_val, base_avg_gap),
         }
     )
 
@@ -1421,6 +1546,10 @@ if comparison_records:
             "平均VA/分差分(円)": "{:+.2f}",
             "日次付加価値(円)": "{:,.0f}",
             "日次付加価値差分(円)": "{:+,.0f}",
+            "平均必要販売単価(円)": "{:,.0f}",
+            "平均必要販売単価差分(円)": "{:+,.0f}",
+            "平均必要賃率差(円/分)": "{:+.2f}",
+            "平均必要賃率差分(円/分)": "{:+.2f}",
         },
         na_rep="-",
     )
@@ -1476,6 +1605,10 @@ if comparison_records:
         "達成率差分(pts)",
         "VA/分差分(円)",
         "日次付加価値差分(円)",
+        "平均必要販売単価(円)",
+        "平均必要販売単価差分(円)",
+        "平均必要賃率差(円/分)",
+        "平均必要賃率差分(円/分)",
     ]
     table_rows = [table_header]
     for record in comparison_records:
@@ -1489,6 +1622,10 @@ if comparison_records:
                 _fmt(record["達成率差分(pts)"], "{:+.1f}"),
                 _fmt(record["平均VA/分差分(円)"], "{:+.2f}"),
                 _fmt(record["日次付加価値差分(円)"], "{:+,.0f}"),
+                _fmt(record["平均必要販売単価(円)"], "{:,.0f}"),
+                _fmt(record["平均必要販売単価差分(円)"], "{:+,.0f}"),
+                _fmt(record["平均必要賃率差(円/分)"], "{:+.2f}"),
+                _fmt(record["平均必要賃率差分(円/分)"], "{:+.2f}"),
             ]
         )
 
@@ -1515,11 +1652,18 @@ if comparison_records:
     for record in comparison_records:
         if record["シナリオ"] == "ベース":
             continue
-        summary_line = (
-            f"{record['シナリオ']}: 達成率 {_fmt(record['達成率差分(pts)'], '{:+.1f}')}pt / "
-            f"平均VA {_fmt(record['平均VA/分差分(円)'], '{:+.2f}')}円 / "
-            f"日次VA {_fmt(record['日次付加価値差分(円)'], '{:+,.0f}')}円"
-        )
+        parts = [
+            f"達成率 {_fmt(record['達成率差分(pts)'], '{:+.1f}')}pt",
+            f"平均VA {_fmt(record['平均VA/分差分(円)'], '{:+.2f}')}円",
+            f"日次VA {_fmt(record['日次付加価値差分(円)'], '{:+,.0f}')}円",
+        ]
+        req_price_part = _fmt(record["平均必要販売単価差分(円)"], "{:+,.0f}")
+        if req_price_part != "-":
+            parts.append(f"必要販売単価 {req_price_part}円")
+        gap_part = _fmt(record["平均必要賃率差分(円/分)"], "{:+.2f}")
+        if gap_part != "-":
+            parts.append(f"必要賃率差 {gap_part}円/分")
+        summary_line = f"{record['シナリオ']}: " + " / ".join(parts)
         story.append(Paragraph(summary_line, styles["Normal"]))
 
     doc.build(story)
@@ -1544,7 +1688,7 @@ else:
     st.info("比較対象のシナリオを選択してください。")
 
 st.markdown("##### 📊 感度分析ハイライト")
-mcol1, mcol2, mcol3 = st.columns(3)
+mcol1, mcol2, mcol3, mcol4 = st.columns(4)
 mcol1.metric(
     "必要賃率達成率",
     f"{ach_rate:.1f}%" if np.isfinite(ach_rate) else "N/A",
@@ -1560,11 +1704,51 @@ mcol3.metric(
     f"{sim_daily_va_total:,.0f}円" if np.isfinite(sim_daily_va_total) else "N/A",
     delta=f"{daily_delta:+,.0f}円" if np.isfinite(daily_delta) else "N/A",
 )
+annual_value = (
+    f"{annual_sim_va / 10000:,.1f}万円" if np.isfinite(annual_sim_va) else "N/A"
+)
+annual_delta_text = (
+    f"{annual_delta / 10000:+,.1f}万円" if np.isfinite(annual_delta) else "N/A"
+)
+mcol4.metric("年間利益見込", annual_value, delta=annual_delta_text)
+
+gcol1, gcol2 = st.columns(2)
+gcol1.metric(
+    "平均必要販売単価",
+    f"{avg_req_price:,.0f}円" if np.isfinite(avg_req_price) else "N/A",
+    delta=(
+        f"{req_price_delta_metric:+,.0f}円"
+        if np.isfinite(req_price_delta_metric)
+        else "N/A"
+    ),
+)
+gcol2.metric(
+    "平均必要賃率との差",
+    f"{avg_gap:+.2f}円/分" if np.isfinite(avg_gap) else "N/A",
+    delta=(
+        f"{gap_delta_metric:+.2f}円/分"
+        if np.isfinite(gap_delta_metric)
+        else "N/A"
+    ),
+)
+
+scenario_summary_text = _summarize_scenario_effect(
+    ach_delta=ach_delta,
+    vapm_delta=vapm_delta,
+    daily_delta=daily_delta,
+    annual_delta=annual_delta,
+    req_price_delta=req_price_delta_metric,
+    gap_delta=gap_delta_metric,
+)
+if scenario_summary_text:
+    st.markdown(f"**KPI変化サマリ:** {scenario_summary_text}")
 
 if active_label == "ベース" and not any([qp, qc, qv, qm]):
     st.caption("シミュレーション条件を変更すると年間インパクトの概算を表示します。")
 else:
-    st.info(f"フェルミ推定: {_format_fermi_estimate(daily_delta, working_days, active_label)}")
+    st.info(
+        f"フェルミ推定: {_format_fermi_estimate(daily_delta, working_days, active_label)}"
+    )
 
 driver_df, driver_messages = _analyze_driver_impacts(
     scenario_template,
@@ -1593,8 +1777,8 @@ if driver_messages or not driver_df.empty:
                 "日次付加価値差(円)": "{:+,.0f}",
                 "年間利益差(万円)": "{:+,.1f}",
                 "平均VA/分差(円)": "{:+.2f}",
-                "必要賃率ギャップ差(円/分)": "{:+.2f}",
-                "必要販売単価差(円)": "{:+,.0f}",
+                "平均必要賃率差(円/分)": "{:+.2f}",
+                "平均必要販売単価差(円)": "{:+,.0f}",
             },
             na_rep="-",
         )
