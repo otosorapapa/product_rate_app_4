@@ -17,10 +17,177 @@ from components import (
     render_sidebar_nav,
 )
 import os
+from io import BytesIO
 from textwrap import dedent
-from typing import Any
+from typing import Any, Optional
 from openai import OpenAI
 from offline import restore_session_state_from_cache, sync_offline_cache
+
+WIZARD_STEPS: list[tuple[str, str]] = [
+    ("従業員情報", "従業員区分ごとの人数と稼働係数を入力します。"),
+    ("標準作業時間", "年間稼働日数や1日の操業条件を設定します。"),
+    ("法定費用・間接費", "労務費や販管費など固定的に発生する費用を入力します。"),
+    ("利益率設定", "借入返済や納税・納付など確保したい利益額を登録します。"),
+    ("結果表示", "標準賃率と差異分析を確認し、改善ポイントを検討します。"),
+]
+
+PARAM_METADATA: dict[str, dict[str, str]] = {
+    "labor_cost": {"label": "労務費", "category": "固定費", "unit": "円/年"},
+    "sga_cost": {"label": "販管費", "category": "固定費", "unit": "円/年"},
+    "loan_repayment": {"label": "借入返済", "category": "利益確保", "unit": "円/年"},
+    "tax_payment": {"label": "納税・納付", "category": "利益確保", "unit": "円/年"},
+    "future_business": {"label": "未来事業費", "category": "利益確保", "unit": "円/年"},
+    "fulltime_workers": {"label": "正社員数", "category": "従業員", "unit": "人"},
+    "part1_workers": {"label": "準社員A数", "category": "従業員", "unit": "人"},
+    "part2_workers": {"label": "準社員B数", "category": "従業員", "unit": "人"},
+    "part2_coefficient": {"label": "準社員B稼働係数", "category": "従業員", "unit": "係数"},
+    "working_days": {"label": "年間稼働日数", "category": "稼働条件", "unit": "日"},
+    "daily_hours": {"label": "1日稼働時間", "category": "稼働条件", "unit": "時間"},
+    "operation_rate": {"label": "1日の稼働率", "category": "稼働条件", "unit": "比率"},
+}
+
+FORMULA_TIPS: tuple[str, ...] = (
+    "標準労務費 ＝ 標準時間 × 標準賃率",
+    "賃率差異 ＝ 実際時間 × (標準賃率 − 実際賃率)",
+    "効率差異 ＝ 標準賃率 × (標準時間 − 実際時間)",
+)
+
+
+def render_wizard_stepper(current_step: int) -> None:
+    """Render a responsive step indicator for the guided input flow."""
+
+    total_steps = len(WIZARD_STEPS)
+    progress = 0.0 if total_steps <= 1 else current_step / (total_steps - 1)
+    st.progress(progress)
+    st.caption(f"ステップ {current_step + 1} / {total_steps}")
+
+    blocks: list[str] = ["<div class=\"sr-stepper\">"]
+    for idx, (title, desc) in enumerate(WIZARD_STEPS):
+        status = "is-active" if idx == current_step else "is-complete" if idx < current_step else "is-pending"
+        indicator = idx + 1
+        detail = desc if idx == current_step else ""
+        block = (
+            "<div class=\"sr-step {status}\">"
+            "<span class=\"sr-step-index\">{indicator}</span>"
+            "<div class=\"sr-step-body\"><strong>{title}</strong>"
+            "<p class=\"sr-step-desc\">{detail}</p></div>"
+            "</div>"
+        ).format(status=status, indicator=indicator, title=title, detail=detail)
+        blocks.append(block)
+    blocks.append("</div>")
+    st.markdown("\n".join(blocks), unsafe_allow_html=True)
+
+
+def classify_variance(value: float) -> str:
+    """Return a textual judgement (F/A) for variance analysis."""
+
+    if abs(value) < 1e-6:
+        return "±0"
+    return "有利 (F)" if value < 0 else "不利 (A)"
+
+
+def build_excel_report(
+    params: dict[str, float],
+    nodes: dict[str, dict[str, Any]],
+    variance_inputs: dict[str, float],
+    variance_table: pd.DataFrame,
+) -> bytes:
+    """Generate an Excel workbook summarising assumptions and results."""
+
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+        param_rows = []
+        for key, meta in PARAM_METADATA.items():
+            if key not in params:
+                continue
+            param_rows.append(
+                {
+                    "カテゴリ": meta["category"],
+                    "項目": meta["label"],
+                    "値": params[key],
+                    "単位": meta["unit"],
+                }
+            )
+        if param_rows:
+            pd.DataFrame(param_rows).to_excel(writer, sheet_name="入力前提", index=False)
+
+        result_rows = []
+        for node in nodes.values():
+            result_rows.append(
+                {
+                    "指標": node.get("label"),
+                    "値": node.get("value"),
+                    "単位": node.get("unit"),
+                    "計算式": node.get("formula"),
+                    "依存要素": ", ".join(node.get("depends_on", [])),
+                }
+            )
+        if result_rows:
+            pd.DataFrame(result_rows).to_excel(writer, sheet_name="標準賃率指標", index=False)
+
+        variance_inputs_rows = [
+            {"区分": "標準時間 (分)", "値": variance_inputs.get("standard_minutes", 0.0)},
+            {"区分": "標準賃率 (円/分)", "値": variance_inputs.get("standard_rate", 0.0)},
+            {"区分": "標準労務費 (円)", "値": variance_inputs.get("standard_labor_cost", 0.0)},
+            {"区分": "実際時間 (分)", "値": variance_inputs.get("actual_minutes", 0.0)},
+            {"区分": "実際賃率 (円/分)", "値": variance_inputs.get("actual_rate", 0.0)},
+            {"区分": "実際労務費 (円)", "値": variance_inputs.get("actual_labor_cost", 0.0)},
+        ]
+        variance_sheet = pd.DataFrame(variance_inputs_rows)
+        variance_sheet.to_excel(writer, sheet_name="差異分析", index=False)
+        start_row = len(variance_inputs_rows) + 2
+        variance_table.to_excel(writer, sheet_name="差異分析", index=False, startrow=start_row)
+
+    buffer.seek(0)
+    return buffer.read()
+
+
+def render_info_popover(label: str, content: str, container: Optional[Any] = None) -> None:
+    """Render an information popover with graceful fallback."""
+
+    target = container if container is not None else st
+    popover = getattr(target, "popover", None)
+    if callable(popover):
+        with popover(label):
+            target.markdown(content)
+    else:
+        info_fn = getattr(target, "info", None)
+        if callable(info_fn):
+            info_fn(content)
+        else:
+            st.info(content)
+
+
+def render_wizard_nav(current_step: int, location: str = "top") -> None:
+    """Render navigation buttons for the guided wizard."""
+
+    total_steps = len(WIZARD_STEPS)
+    nav_container = st.container()
+    nav_container.markdown('<div class="sr-nav-buttons">', unsafe_allow_html=True)
+    prev_col, next_col = nav_container.columns(2, gap="small")
+
+    prev_disabled = current_step <= 0
+    if prev_col.button(
+        "← 戻る",
+        disabled=prev_disabled,
+        use_container_width=True,
+        key=f"sr_nav_prev_{location}_{current_step}",
+    ):
+        st.session_state["sr_wizard_step"] = max(current_step - 1, 0)
+        st.rerun()
+
+    next_disabled = current_step >= total_steps - 1
+    next_label = "次へ →" if not next_disabled else "ウィザード完了"
+    if next_col.button(
+        next_label,
+        disabled=next_disabled,
+        use_container_width=True,
+        key=f"sr_nav_next_{location}_{current_step}",
+    ):
+        st.session_state["sr_wizard_step"] = min(current_step + 1, total_steps - 1)
+        st.rerun()
+
+    nav_container.markdown("</div>", unsafe_allow_html=True)
 
 
 def _explain_standard_rate(
@@ -434,6 +601,69 @@ st.markdown(
         color: var(--app-text) !important;
         font-weight: 700;
     }
+    .sr-stepper {
+        display: flex;
+        gap: 0.8rem;
+        flex-wrap: wrap;
+        margin: 0.8rem 0 1.2rem;
+    }
+    .sr-step {
+        flex: 1 1 180px;
+        background: var(--app-surface);
+        border-radius: 16px;
+        border: 1px solid var(--app-border);
+        padding: 0.8rem 1rem;
+        display: flex;
+        align-items: center;
+        gap: 0.8rem;
+        box-shadow: 0 12px 24px rgba(0, 0, 0, 0.08);
+        transition: border 0.2s ease, box-shadow 0.2s ease;
+    }
+    .sr-step-index {
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        color: var(--app-surface);
+        background: var(--app-border);
+    }
+    .sr-step.is-active {
+        border-color: var(--app-accent);
+        box-shadow: 0 16px 32px rgba(0, 0, 0, 0.15);
+    }
+    .sr-step.is-active .sr-step-index {
+        background: var(--app-accent);
+    }
+    .sr-step.is-complete .sr-step-index {
+        background: var(--app-accent);
+        opacity: 0.55;
+    }
+    .sr-step-body strong {
+        color: var(--app-text);
+        display: block;
+        margin-bottom: 0.2rem;
+    }
+    .sr-step-desc {
+        margin: 0;
+        color: var(--app-muted);
+        font-size: var(--app-font-small);
+    }
+    .sr-nav-buttons {
+        display: flex;
+        gap: 0.6rem;
+        margin: 0.8rem 0 1.4rem;
+    }
+    .sr-nav-buttons > div {
+        flex: 1;
+    }
+    .sr-nav-buttons > div button {
+        width: 100%;
+        border-radius: 999px;
+        font-weight: 600;
+    }
     div[data-testid="metric-container"] {
         background: var(--app-surface);
         border-radius: 20px;
@@ -464,6 +694,35 @@ st.markdown(
     }
     .sr-highlight strong {
         color: var(--app-accent);
+    }
+    @media (max-width: 860px) {
+        .sr-section {
+            padding: 1.1rem 1.2rem;
+        }
+        .sr-stepper {
+            flex-direction: column;
+        }
+        .sr-step {
+            flex: 1 1 100%;
+        }
+        .sr-step-index {
+            width: 28px;
+            height: 28px;
+            font-size: 0.85rem;
+        }
+        .sr-nav-buttons {
+            flex-direction: column;
+        }
+        .sr-nav-buttons > div button {
+            width: 100%;
+        }
+        div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+            width: 100% !important;
+            flex: 1 1 100% !important;
+        }
+        div[data-testid="metric-container"] {
+            margin-bottom: 0.8rem;
+        }
     }
     </style>
     """,
@@ -497,165 +756,210 @@ if current != "ベース" and st.sidebar.button("削除"):
     st.session_state["sr_params"] = scenarios["ベース"].copy()
     st.rerun()
 
+st.sidebar.divider()
+st.sidebar.subheader("計算式チートシート")
+for tip in FORMULA_TIPS:
+    st.sidebar.caption(f"・{tip}")
+
 st.markdown(
     """
     <div class="sr-highlight">
-        標準賃率は「工場を動かすのに最低限必要な売上単価」です。下記の前提を変えると、主要な賃率指標が即座にアップデートされます。
+        標準賃率は「工場を動かすのに最低限必要な売上単価」です。入力条件を段階的に見直すと主要な指標が即座にアップデートされます。
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-st.markdown("### 入力条件")
-st.caption("数字を直接入力すると即時に再計算され、影響を受ける指標が項目ごとに表示されます。")
+guide_info = (
+    "- 標準賃率は技能・所要時間・業界賃率・労使協定・法律などの基準をもとに決定します。\n"
+    "- 本ウィザードでは固定費と稼働条件を整理し、必要賃率や損益分岐賃率を算出します。\n"
+    "**よく使う公式**\n"
+    + "\n".join(f"- {tip}" for tip in FORMULA_TIPS)
+)
+render_info_popover("ℹ️ 標準賃率の考え方", guide_info)
 
-placeholders = {}
+total_steps = len(WIZARD_STEPS)
+current_step = st.session_state.setdefault("sr_wizard_step", 0)
+if current_step < 0:
+    current_step = 0
+if current_step >= total_steps:
+    current_step = total_steps - 1
+st.session_state["sr_wizard_step"] = current_step
 
-section_container = st.container()
-section_container.markdown('<div class="sr-section">', unsafe_allow_html=True)
-with section_container.container():
-    st.markdown("#### A) 必要固定費（円/年）")
-    st.caption("製造を維持するために必ず発生する年間コストです。")
-    fixed_col1, fixed_col2 = st.columns(2, gap="large")
-    with fixed_col1:
-        params["labor_cost"] = st.number_input(
-            "労務費（製造担当の年間人件費）",
-            value=float(params["labor_cost"]),
-            step=1000.0,
-            format="%.0f",
-            min_value=0.0,
-            help="工場で働くメンバーに支払う給与・賞与・社会保険料などの合計です。",
-        )
-        placeholders["labor_cost"] = st.empty()
-    with fixed_col2:
-        params["sga_cost"] = st.number_input(
-            "販管費（共通管理コスト）",
-            value=float(params["sga_cost"]),
-            step=1000.0,
-            format="%.0f",
-            min_value=0.0,
-            help="製造以外に必要な管理部門・営業部門の共通費用を含みます。",
-        )
-        placeholders["sga_cost"] = st.empty()
-section_container.markdown("</div>", unsafe_allow_html=True)
+st.markdown("### ガイド付き入力")
+render_wizard_stepper(current_step)
 
-section_container = st.container()
-section_container.markdown('<div class="sr-section">', unsafe_allow_html=True)
-with section_container.container():
-    st.markdown("#### B) 必要利益（円/年）")
-    st.caption("事業を健全に続けるために確保したい利益水準です。")
-    profit_col1, profit_col2, profit_col3 = st.columns(3, gap="large")
-    with profit_col1:
-        params["loan_repayment"] = st.number_input(
-            "借入返済（年間返済額）",
-            value=float(params["loan_repayment"]),
-            step=1000.0,
-            format="%.0f",
-            min_value=0.0,
-            help="銀行等への年間返済額。資金繰り計画に沿って設定してください。",
-        )
-        placeholders["loan_repayment"] = st.empty()
-    with profit_col2:
-        params["tax_payment"] = st.number_input(
-            "納税・納付（年間見込額）",
-            value=float(params["tax_payment"]),
-            step=1000.0,
-            format="%.0f",
-            min_value=0.0,
-            help="法人税や社会保険料など、利益確保後に支払う義務がある金額です。",
-        )
-        placeholders["tax_payment"] = st.empty()
-    with profit_col3:
-        params["future_business"] = st.number_input(
-            "未来事業費（投資原資）",
-            value=float(params["future_business"]),
-            step=1000.0,
-            format="%.0f",
-            min_value=0.0,
-            help="新設備や人材育成など、将来に向けて確保したい資金を入力します。",
-        )
-        placeholders["future_business"] = st.empty()
-section_container.markdown("</div>", unsafe_allow_html=True)
+placeholders: dict[str, Any] = {}
 
-section_container = st.container()
-section_container.markdown('<div class="sr-section">', unsafe_allow_html=True)
-with section_container.container():
-    st.markdown("#### C) 人員・稼働前提")
-    st.caption("工場の人員体制と稼働日数/時間の想定です。『稼働係数』はフルタイム勤務を1.00とした場合の働き方の比率を表します。")
-    staff_col1, staff_col2, staff_col3 = st.columns(3, gap="large")
-    with staff_col1:
-        params["fulltime_workers"] = st.number_input(
-            "正社員の人数（常勤）",
-            value=float(params["fulltime_workers"]),
-            step=0.5,
-            format="%.2f",
-            min_value=0.0,
-            help="常勤で働く正社員人数。1人あたり稼働係数は1.00です。",
+step_container = st.container()
+step_container.markdown('<div class="sr-section">', unsafe_allow_html=True)
+with step_container.container():
+    if current_step == 0:
+        st.markdown("#### ステップ1: 従業員情報の入力")
+        st.caption("技能や勤務形態ごとの人数と稼働係数を登録します。")
+        render_info_popover(
+            "ℹ️ 人員区分のヒント",
+            "- 正社員: フルタイムで技能水準が高いメンバー。\n"
+            "- 準社員A: パート・アルバイトなど短時間勤務者（標準係数0.75で換算）。\n"
+            "- 準社員B: シフトが柔軟な人員。稼働係数を調整して実働換算します。",
         )
-        placeholders["fulltime_workers"] = st.empty()
-    with staff_col2:
-        params["part1_workers"] = st.number_input(
-            "準社員Aの人数（短時間勤務）",
-            value=float(params["part1_workers"]),
-            step=0.5,
-            format="%.2f",
-            min_value=0.0,
-            help="短時間勤務の準社員人数。想定稼働係数は0.75です。",
-        )
-        placeholders["part1_workers"] = st.empty()
-    with staff_col3:
-        params["part2_workers"] = st.number_input(
-            "準社員Bの人数（柔軟シフト）",
-            value=float(params["part2_workers"]),
-            step=0.5,
-            format="%.2f",
-            min_value=0.0,
-            help="シフトが柔軟な準社員人数。稼働係数は下のスライダーで調整します。",
-        )
-        placeholders["part2_workers"] = st.empty()
+        staff_cols = st.columns(3, gap="large")
+        with staff_cols[0]:
+            params["fulltime_workers"] = st.number_input(
+                "正社員の人数",
+                value=float(params["fulltime_workers"]),
+                step=0.5,
+                format="%.2f",
+                min_value=0.0,
+                help="技能・資格を備えた常勤従業員数。標準賃率の技能基準を反映します。",
+            )
+            placeholders["fulltime_workers"] = st.empty()
+        with staff_cols[1]:
+            params["part1_workers"] = st.number_input(
+                "準社員Aの人数（短時間）",
+                value=float(params["part1_workers"]),
+                step=0.5,
+                format="%.2f",
+                min_value=0.0,
+                help="短時間勤務の準社員人数。標準では稼働係数0.75で正社員換算します。",
+            )
+            placeholders["part1_workers"] = st.empty()
+        with staff_cols[2]:
+            params["part2_workers"] = st.number_input(
+                "準社員Bの人数（柔軟シフト）",
+                value=float(params["part2_workers"]),
+                step=0.5,
+                format="%.2f",
+                min_value=0.0,
+                help="曜日・時間帯でシフトを最適化する人員。稼働係数は下のスライダーで調整します。",
+            )
+            placeholders["part2_workers"] = st.empty()
 
-    coeff_col, days_col, hours_col, rate_col = st.columns(4, gap="large")
-    with coeff_col:
         params["part2_coefficient"] = st.slider(
             "準社員Bの稼働係数",
             value=float(params["part2_coefficient"]),
             min_value=0.0,
             max_value=1.0,
             step=0.01,
-            help="フルタイムを1.00とした場合の働きぶりの割合です。0.60なら6割稼働を意味します。",
+            help="フルタイムを1.00とした場合の働きぶり。0.60なら6割稼働を意味します。",
         )
         placeholders["part2_coefficient"] = st.empty()
-    with days_col:
-        params["working_days"] = st.number_input(
-            "年間稼働日数",
-            value=float(params["working_days"]),
-            step=1.0,
-            format="%.0f",
-            min_value=1.0,
-            help="1年間で工場を動かす日数です（休日や定期点検日を除きます）。",
+
+    elif current_step == 1:
+        st.markdown("#### ステップ2: 標準作業時間の設定")
+        st.caption("年間稼働日数と1日の操業条件を設定します。")
+        render_info_popover(
+            "ℹ️ 標準時間の決め方",
+            "- 標準時間は熟練者が安全に達成できる時間を基準に設定します。\n"
+            "- 段取り替えや休憩、保全時間も操業度に織り込んでください。",
         )
-        placeholders["working_days"] = st.empty()
-    with hours_col:
-        params["daily_hours"] = st.number_input(
-            "1日あたりの稼働時間",
-            value=float(params["daily_hours"]),
-            step=0.1,
-            format="%.2f",
-            min_value=0.1,
-            help="工場を動かす時間帯の合計です。たとえば8時間稼働なら『8.0』を入力します。",
+        time_cols = st.columns(3, gap="large")
+        with time_cols[0]:
+            params["working_days"] = st.number_input(
+                "年間稼働日数",
+                value=float(params["working_days"]),
+                step=1.0,
+                format="%.0f",
+                min_value=1.0,
+                help="休日・点検日を除いた年間の操業日数です。",
+            )
+            placeholders["working_days"] = st.empty()
+        with time_cols[1]:
+            params["daily_hours"] = st.number_input(
+                "1日あたりの稼働時間",
+                value=float(params["daily_hours"]),
+                step=0.1,
+                format="%.2f",
+                min_value=0.1,
+                help="シフトを通じて確保する標準稼働時間。休憩を除いた純稼働時間を入力します。",
+            )
+            placeholders["daily_hours"] = st.empty()
+        with time_cols[2]:
+            params["operation_rate"] = st.slider(
+                "1日の稼働率",
+                value=float(params["operation_rate"]),
+                min_value=0.5,
+                max_value=1.0,
+                step=0.01,
+                help="有効稼働時間の割合。段取り替え・打ち合わせ時間などを差し引いた実効稼働率です。",
+            )
+            placeholders["operation_rate"] = st.empty()
+
+    elif current_step == 2:
+        st.markdown("#### ステップ3: 法定費用・間接費の入力")
+        st.caption("標準賃率の基礎となる固定費を登録します。")
+        render_info_popover(
+            "ℹ️ 固定費の内訳",
+            "- 労務費: 技能・所要時間・業界賃率・労使協定・法律を基準に算出した標準人件費。\n"
+            "- 販管費: 法定福利費や共通間接費など、操業に不可欠な間接費を含みます。",
         )
-        placeholders["daily_hours"] = st.empty()
-    with rate_col:
-        params["operation_rate"] = st.slider(
-            "1日の稼働率",
-            value=float(params["operation_rate"]),
-            min_value=0.5,
-            max_value=1.0,
-            step=0.01,
-            help="実働時間のうち、生産に充てられる割合です。0.85なら85%の時間が有効稼働になります。",
+        cost_cols = st.columns(2, gap="large")
+        with cost_cols[0]:
+            params["labor_cost"] = st.number_input(
+                "労務費（年間）",
+                value=float(params["labor_cost"]),
+                step=1000.0,
+                format="%.0f",
+                min_value=0.0,
+                help="技能・所要時間・業界賃率を根拠に設定した標準人件費の合計です。",
+            )
+            placeholders["labor_cost"] = st.empty()
+        with cost_cols[1]:
+            params["sga_cost"] = st.number_input(
+                "販管費（年間）",
+                value=float(params["sga_cost"]),
+                step=1000.0,
+                format="%.0f",
+                min_value=0.0,
+                help="法定福利費や共通管理費など、製造以外に必須となる固定的コストです。",
+            )
+            placeholders["sga_cost"] = st.empty()
+
+    elif current_step == 3:
+        st.markdown("#### ステップ4: 利益率設定")
+        st.caption("借入返済や納税・将来投資に必要な利益額を設定します。")
+        render_info_popover(
+            "ℹ️ 目標利益の考え方",
+            "- 必要賃率＝(固定費 + 必要利益) ÷ 年間標準稼働分 で算出します。\n"
+            "- 返済・納税・投資の計画を金額ベースで入力し、賃率に落とし込みます。",
         )
-        placeholders["operation_rate"] = st.empty()
-section_container.markdown("</div>", unsafe_allow_html=True)
+        profit_cols = st.columns(3, gap="large")
+        with profit_cols[0]:
+            params["loan_repayment"] = st.number_input(
+                "借入返済（年間）",
+                value=float(params["loan_repayment"]),
+                step=1000.0,
+                format="%.0f",
+                min_value=0.0,
+                help="金融機関などへの年間返済額。キャッシュフロー計画を反映します。",
+            )
+            placeholders["loan_repayment"] = st.empty()
+        with profit_cols[1]:
+            params["tax_payment"] = st.number_input(
+                "納税・納付（年間）",
+                value=float(params["tax_payment"]),
+                step=1000.0,
+                format="%.0f",
+                min_value=0.0,
+                help="法人税や社会保険料など、法律で義務付けられた支出です。",
+            )
+            placeholders["tax_payment"] = st.empty()
+        with profit_cols[2]:
+            params["future_business"] = st.number_input(
+                "未来事業費（投資原資）",
+                value=float(params["future_business"]),
+                step=1000.0,
+                format="%.0f",
+                min_value=0.0,
+                help="新規事業や設備更新など、将来に向けて確保したい利益額です。",
+            )
+            placeholders["future_business"] = st.empty()
+
+    else:
+        st.markdown("#### ステップ5: 結果表示")
+        st.caption("設定した前提をもとに標準賃率と差異分析を確認できます。下部で実績データを入力してください。")
+
+step_container.markdown("</div>", unsafe_allow_html=True)
 
 params, warn_list = sanitize_params(params)
 for w in warn_list:
@@ -671,180 +975,328 @@ for k, ph in placeholders.items():
     if affected:
         ph.caption(f"この入力が影響する指標: {affected}")
 
-c1, c2, c3, c4 = st.columns(4, gap="large")
-with c1:
-    st.metric("損益分岐賃率（円/分）", f"{results['break_even_rate']:.3f}")
-    st.caption("売上単価がこの水準を上回ると、固定費を回収して黒字化します。")
-with c2:
-    st.metric("必要賃率（円/分）", f"{results['required_rate']:.3f}")
-    st.caption("借入返済や将来投資を含め、目標利益を確保するための最低単価です。")
-with c3:
-    st.metric("年間標準稼働時間（分）", f"{results['annual_minutes']:.0f}")
-    st.caption("人員構成と稼働率から算出した、年間で確保できる生産可能時間です。")
-with c4:
-    st.metric("正味直接工員数合計", f"{results['net_workers']:.2f}")
-    st.caption("稼働係数を考慮した実働ベースの生産要員数です。")
+headcount_total = params["fulltime_workers"] + params["part1_workers"] + params["part2_workers"]
+part_workers = params["part1_workers"] + params["part2_workers"]
+part_ratio_pct = part_workers / headcount_total * 100 if headcount_total > 0 else 0.0
 
-st.subheader("AI解説・アクションプラン")
-st.caption("AIが標準賃率の背景と数値根拠つきの改善策を提示します。表現モードを選んでから生成してください。")
-
-explain_options = {
-    "経営者向け（簡易表現）": "simple",
-    "管理会計担当向け（詳細表現）": "detailed",
-}
-selected_label = st.radio(
-    "表現モード",
-    list(explain_options.keys()),
-    index=0,
-    horizontal=True,
-    help="経営者向けは意思決定ポイントを平易に整理し、管理会計担当向けは専門用語を交えて深掘りします。",
-)
-detail_key = explain_options[selected_label]
-
-if "sr_ai_comment" not in st.session_state:
-    st.session_state["sr_ai_comment"] = {}
-if "sr_ai_action_plan" not in st.session_state:
-    st.session_state["sr_ai_action_plan"] = {}
-
-if st.button("AI解説・アクションプラン生成"):
-    with st.spinner("生成中..."):
-        ai_text, plan_payload = _explain_standard_rate(params, results, detail_key)
-        st.session_state["sr_ai_comment"][detail_key] = ai_text
-        st.session_state["sr_ai_action_plan"][detail_key] = plan_payload
-
-ai_comment = st.session_state["sr_ai_comment"].get(detail_key, "")
-ai_plan_data = st.session_state["sr_ai_action_plan"].get(detail_key, [])
-if ai_comment:
-    if ai_comment.startswith("OpenAI APIキー"):
-        st.warning(ai_comment)
-    elif ai_comment.startswith("AI説明の生成に失敗しました"):
-        st.error(ai_comment)
-    else:
-        st.markdown(ai_comment)
+if current_step == 0:
+    summary_cols = st.columns(3, gap="large")
+    with summary_cols[0]:
+        st.metric("正味直接工員数", f"{results['net_workers']:.2f} 人")
+    with summary_cols[1]:
+        st.metric("総人員", f"{headcount_total:.2f} 人")
+    with summary_cols[2]:
+        st.metric("パート比率", f"{part_ratio_pct:.1f} %")
+    st.caption("人員構成を見直すと標準時間と固定費の割付が変わります。")
+elif current_step == 1:
+    time_cols = st.columns(3, gap="large")
+    with time_cols[0]:
+        st.metric("1日稼働分", f"{results['minutes_per_day']:.0f} 分")
+    with time_cols[1]:
+        st.metric("1日標準稼働分", f"{results['standard_daily_minutes']:.0f} 分")
+    with time_cols[2]:
+        st.metric("年間標準稼働分", f"{results['annual_minutes']:.0f} 分")
+    st.caption("標準労務費＝標準時間×標準賃率 の基礎となる指標です。")
+elif current_step == 2:
+    cost_cols = st.columns(2, gap="large")
+    with cost_cols[0]:
+        st.metric("固定費計", f"{results['fixed_total']:,.0f} 円")
+    with cost_cols[1]:
+        st.metric("1日当り損益分岐付加価値", f"{results['daily_be_va']:,.0f} 円")
+    st.caption("固定費の圧縮は損益分岐賃率の改善に直結します。")
+elif current_step == 3:
+    profit_cols = st.columns(3, gap="large")
+    with profit_cols[0]:
+        st.metric("必要利益計", f"{results['required_profit_total']:,.0f} 円")
+    with profit_cols[1]:
+        st.metric("損益分岐賃率", f"{results['break_even_rate']:.3f} 円/分")
+    with profit_cols[2]:
+        st.metric("必要賃率", f"{results['required_rate']:.3f} 円/分")
+    st.caption("目標単価が必要賃率を上回るかをチェックしましょう。")
 else:
-    st.caption("※ボタンを押すと、選択した表現モードでAIの解説と施策案が表示されます。")
+    st.caption("下部に標準賃率の結果と差異分析を表示します。")
 
-if ai_plan_data:
-    st.markdown("#### AI提案のアクションプラン試算")
-    base_headcount = (
-        params["fulltime_workers"] + params["part1_workers"] + params["part2_workers"]
-    )
-    base_part_ratio = (
-        (params["part1_workers"] + params["part2_workers"]) / base_headcount * 100
-        if base_headcount > 0
-        else 0.0
-    )
-    plan_rows = []
-    for sc in ai_plan_data:
-        param_changes = sc.get("param_changes") or {}
-        change_desc = (
-            ", ".join(f"{k}: {v}" for k, v in param_changes.items()) if param_changes else "－"
+render_wizard_nav(current_step, location="main")
+
+if current_step >= 4:
+    c1, c2, c3, c4 = st.columns(4, gap="large")
+    with c1:
+        st.metric("損益分岐賃率（円/分）", f"{results['break_even_rate']:.3f}")
+        st.caption("売上単価がこの水準を上回ると、固定費を回収して黒字化します。")
+    with c2:
+        st.metric("必要賃率（円/分）", f"{results['required_rate']:.3f}")
+        st.caption("借入返済や将来投資を含め、目標利益を確保するための最低単価です。")
+    with c3:
+        st.metric("年間標準稼働時間（分）", f"{results['annual_minutes']:.0f}")
+        st.caption("人員構成と稼働率から算出した、年間で確保できる生産可能時間です。")
+    with c4:
+        st.metric("正味直接工員数合計", f"{results['net_workers']:.2f}")
+        st.caption("稼働係数を考慮した実働ベースの生産要員数です。")
+
+    st.markdown("#### 差異分析（標準 vs 実績）")
+    variance_state = st.session_state.setdefault("sr_variance_inputs", {})
+    default_actual_minutes = variance_state.get("actual_minutes", results["annual_minutes"])
+    default_actual_rate = variance_state.get("actual_rate", results["required_rate"])
+    var_cols = st.columns(2, gap="large")
+    with var_cols[0]:
+        actual_minutes = st.number_input(
+            "実際稼働時間（分）",
+            value=float(default_actual_minutes),
+            min_value=0.0,
+            step=1.0,
+            help="分析対象期間の実際稼働時間。タイムカードや工程実績から入力します。",
         )
-        plan_rows.append(
+    with var_cols[1]:
+        actual_rate = st.number_input(
+            "実際賃率（円/分）",
+            value=float(default_actual_rate),
+            min_value=0.0,
+            step=0.01,
+            format="%.3f",
+            help="実績の人件費÷実働時間で求めた実際賃率。賃率差異＝実際時間×(標準賃率−実際賃率)。",
+        )
+
+    standard_minutes = results["annual_minutes"]
+    standard_rate = results["required_rate"]
+    standard_labor_cost = standard_minutes * standard_rate
+    actual_labor_cost = actual_minutes * actual_rate
+    rate_variance = actual_minutes * (standard_rate - actual_rate)
+    efficiency_variance = standard_rate * (standard_minutes - actual_minutes)
+    total_variance = actual_labor_cost - standard_labor_cost
+
+    variance_state.update(
+        {
+            "standard_minutes": standard_minutes,
+            "standard_rate": standard_rate,
+            "standard_labor_cost": standard_labor_cost,
+            "actual_minutes": actual_minutes,
+            "actual_rate": actual_rate,
+            "actual_labor_cost": actual_labor_cost,
+            "rate_variance": rate_variance,
+            "efficiency_variance": efficiency_variance,
+            "total_variance": total_variance,
+        }
+    )
+    st.session_state["sr_variance_inputs"] = variance_state
+
+    metric_cols = st.columns(2, gap="large")
+    with metric_cols[0]:
+        st.metric("標準時間（分）", f"{standard_minutes:.0f}")
+        st.metric("標準賃率（円/分）", f"{standard_rate:.3f}")
+    with metric_cols[1]:
+        st.metric("標準労務費（円）", f"{standard_labor_cost:,.0f}")
+        st.metric(
+            "実際労務費（円）",
+            f"{actual_labor_cost:,.0f}",
+            delta=f"{total_variance:,.0f}",
+            delta_color="inverse",
+        )
+
+    variance_df = pd.DataFrame(
+        [
             {
-                "施策": sc.get("title", ""),
-                "重点領域": sc.get("focus") or "－",
-                "狙い": sc.get("narrative", ""),
-                "必要賃率差 (円/分)": f"{sc.get('delta_required_rate', 0.0):+.3f}",
-                "損益分岐差 (円/分)": f"{sc.get('delta_break_even_rate', 0.0):+.3f}",
-                "固定費差 (円/年)": f"{sc.get('delta_fixed_total', 0.0):+,.0f}",
-                "労務費差 (円/年)": f"{sc.get('delta_labor_cost', 0.0):+,.0f}",
-                "年間稼働分差 (分/年)": f"{sc.get('delta_annual_minutes', 0.0):+,.0f}",
-                "パート比率": f"{base_part_ratio:.1f}%→{sc.get('part_ratio_after', base_part_ratio):.1f}% (Δ{sc.get('part_ratio_delta', 0.0):+.1f}pt)",
-                "主な操作値": change_desc,
-                "想定/前提": sc.get("assumption") or sc.get("notes") or "－",
-            }
-        )
-    if plan_rows:
-        plan_df = pd.DataFrame(plan_rows)
-        st.dataframe(plan_df, use_container_width=True, hide_index=True)
-        st.caption("※シミュレーション値はAI説明に合わせた簡易試算です。現場条件での検証を前提にご利用ください。")
+                "指標": "賃率差異",
+                "金額": rate_variance,
+                "判定": classify_variance(rate_variance),
+                "差異の考え方": "実際賃率との比較 (実際時間×(標準賃率−実際賃率))",
+            },
+            {
+                "指標": "効率差異",
+                "金額": efficiency_variance,
+                "判定": classify_variance(efficiency_variance),
+                "差異の考え方": "実際時間との比較 (標準賃率×(標準時間−実際時間))",
+            },
+            {
+                "指標": "総差異",
+                "金額": total_variance,
+                "判定": classify_variance(total_variance),
+                "差異の考え方": "賃率差異 + 効率差異",
+            },
+        ]
+    )
+    variance_style = variance_df.style.format({"金額": "{:+,.0f}"}).applymap(
+        lambda v: "color:#1f8a5c;font-weight:700;" if v == "有利 (F)" else "color:#d64550;font-weight:700;" if v == "不利 (A)" else "",
+        subset=["判定"],
+    )
+    st.dataframe(variance_style, use_container_width=True, hide_index=True)
+    st.caption("標準労務費＝標準時間×標準賃率、賃率差異＝実際時間×(標準賃率−実際賃率)、効率差異＝標準賃率×(標準時間−実際時間)。")
 
-_, wf_col = st.columns([3, 1])
-with wf_col:
-    with st.expander("必要賃率ウォーターフォール", expanded=False):
-        prev_params = st.session_state.get("prev_month_params")
-        if prev_params is not None:
-            _, prev_res = compute_rates(prev_params)
-            f_prev = prev_res["fixed_total"]
-            p_prev = prev_res["required_profit_total"]
-            m_prev = prev_res["annual_minutes"]
-            r_prev = prev_res["required_rate"]
-            f_cur = results["fixed_total"]
-            p_cur = results["required_profit_total"]
-            m_cur = results["annual_minutes"]
-            r_cur = results["required_rate"]
-            diff_fixed = (f_cur - f_prev) / m_prev
-            diff_profit = (p_cur - p_prev) / m_prev
-            diff_minutes = r_cur - r_prev - diff_fixed - diff_profit
-            wf_fig = go.Figure(
-                go.Waterfall(
-                    x=["前月必要賃率", "固定費差分", "必要利益差分", "年間稼働分差分", "当月必要賃率"],
-                    measure=["absolute", "relative", "relative", "relative", "total"],
-                    y=[r_prev, diff_fixed, diff_profit, diff_minutes, r_cur],
-                    increasing={"marker": {"color": "#D55E00"}},
-                    decreasing={"marker": {"color": "#009E73"}},
-                    totals={"marker": {"color": "#0072B2"}},
-                )
-            )
-            wf_fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10), showlegend=False)
-            st.plotly_chart(wf_fig, use_container_width=True)
-            comp_table = pd.DataFrame(
+    st.subheader("AI解説・アクションプラン")
+    st.caption("AIが標準賃率の背景と数値根拠つきの改善策を提示します。表現モードを選んでから生成してください。")
+
+    explain_options = {
+        "経営者向け（簡易表現）": "simple",
+        "管理会計担当向け（詳細表現）": "detailed",
+    }
+    selected_label = st.radio(
+        "表現モード",
+        list(explain_options.keys()),
+        index=0,
+        horizontal=True,
+        help="経営者向けは意思決定ポイントを平易に整理し、管理会計担当向けは専門用語を交えて深掘りします。",
+    )
+    detail_key = explain_options[selected_label]
+
+    if "sr_ai_comment" not in st.session_state:
+        st.session_state["sr_ai_comment"] = {}
+    if "sr_ai_action_plan" not in st.session_state:
+        st.session_state["sr_ai_action_plan"] = {}
+
+    if st.button("AI解説・アクションプラン生成"):
+        with st.spinner("生成中..."):
+            ai_text, plan_payload = _explain_standard_rate(params, results, detail_key)
+            st.session_state["sr_ai_comment"][detail_key] = ai_text
+            st.session_state["sr_ai_action_plan"][detail_key] = plan_payload
+
+    ai_comment = st.session_state["sr_ai_comment"].get(detail_key, "")
+    ai_plan_data = st.session_state["sr_ai_action_plan"].get(detail_key, [])
+    if ai_comment:
+        if ai_comment.startswith("OpenAI APIキー"):
+            st.warning(ai_comment)
+        elif ai_comment.startswith("AI説明の生成に失敗しました"):
+            st.error(ai_comment)
+        else:
+            st.markdown(ai_comment)
+    else:
+        st.caption("※ボタンを押すと、選択した表現モードでAIの解説と施策案が表示されます。")
+
+    if ai_plan_data:
+        st.markdown("#### AI提案のアクションプラン試算")
+        base_headcount = params["fulltime_workers"] + params["part1_workers"] + params["part2_workers"]
+        base_part_ratio = (
+            (params["part1_workers"] + params["part2_workers"]) / base_headcount * 100
+            if base_headcount > 0
+            else 0.0
+        )
+        plan_rows = []
+        for sc in ai_plan_data:
+            param_changes = sc.get("param_changes") or {}
+            change_desc = ", ".join(f"{k}: {v}" for k, v in param_changes.items()) if param_changes else "－"
+            plan_rows.append(
                 {
-                    "項目": ["固定費計", "必要利益計", "年間標準稼働分", "必要賃率"],
-                    "前月": [f_prev, p_prev, m_prev, r_prev],
-                    "当月": [f_cur, p_cur, m_cur, r_cur],
+                    "施策": sc.get("title", ""),
+                    "重点領域": sc.get("focus") or "－",
+                    "狙い": sc.get("narrative", ""),
+                    "必要賃率差 (円/分)": f"{sc.get('delta_required_rate', 0.0):+.3f}",
+                    "損益分岐差 (円/分)": f"{sc.get('delta_break_even_rate', 0.0):+.3f}",
+                    "固定費差 (円/年)": f"{sc.get('delta_fixed_total', 0.0):+,.0f}",
+                    "労務費差 (円/年)": f"{sc.get('delta_labor_cost', 0.0):+,.0f}",
+                    "年間稼働分差 (分/年)": f"{sc.get('delta_annual_minutes', 0.0):+,.0f}",
+                    "パート比率": f"{base_part_ratio:.1f}%→{sc.get('part_ratio_after', base_part_ratio):.1f}% (Δ{sc.get('part_ratio_delta', 0.0):+.1f}pt)",
+                    "主な操作値": change_desc,
+                    "想定/前提": sc.get("assumption") or sc.get("notes") or "－",
                 }
             )
-            comp_table["差額"] = comp_table["当月"] - comp_table["前月"]
-            styled = comp_table.style.applymap(
-                lambda v: "color:red" if v > 0 else "color:blue", subset=["差額"]
+        if plan_rows:
+            plan_df = pd.DataFrame(plan_rows)
+            st.dataframe(plan_df, use_container_width=True, hide_index=True)
+            st.caption("※シミュレーション値はAI説明に合わせた簡易試算です。現場条件での検証を前提にご利用ください。")
+
+    _, wf_col = st.columns([3, 1])
+    with wf_col:
+        with st.expander("必要賃率ウォーターフォール", expanded=False):
+            prev_params = st.session_state.get("prev_month_params")
+            if prev_params is not None:
+                _, prev_res = compute_rates(prev_params)
+                f_prev = prev_res["fixed_total"]
+                p_prev = prev_res["required_profit_total"]
+                m_prev = prev_res["annual_minutes"]
+                r_prev = prev_res["required_rate"]
+                f_cur = results["fixed_total"]
+                p_cur = results["required_profit_total"]
+                m_cur = results["annual_minutes"]
+                r_cur = results["required_rate"]
+                diff_fixed = (f_cur - f_prev) / m_prev
+                diff_profit = (p_cur - p_prev) / m_prev
+                diff_minutes = r_cur - r_prev - diff_fixed - diff_profit
+                wf_fig = go.Figure(
+                    go.Waterfall(
+                        x=["前月必要賃率", "固定費差分", "必要利益差分", "年間稼働分差分", "当月必要賃率"],
+                        measure=["absolute", "relative", "relative", "relative", "total"],
+                        y=[r_prev, diff_fixed, diff_profit, diff_minutes, r_cur],
+                        increasing={"marker": {"color": "#D55E00"}},
+                        decreasing={"marker": {"color": "#009E73"}},
+                        totals={"marker": {"color": "#0072B2"}},
+                    )
+                )
+                wf_fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10), showlegend=False)
+                st.plotly_chart(wf_fig, use_container_width=True)
+                comp_table = pd.DataFrame(
+                    {
+                        "項目": ["固定費計", "必要利益計", "年間標準稼働分", "必要賃率"],
+                        "前月": [f_prev, p_prev, m_prev, r_prev],
+                        "当月": [f_cur, p_cur, m_cur, r_cur],
+                    }
+                )
+                comp_table["差額"] = comp_table["当月"] - comp_table["前月"]
+                styled = comp_table.style.applymap(
+                    lambda v: "color:red" if v > 0 else "color:blue", subset=["差額"]
+                )
+                st.dataframe(styled, use_container_width=True)
+            else:
+                st.info("前月データがありません。")
+
+    st.subheader("ブレークダウン")
+    st.caption("各指標の計算式と、どの入力が影響しているかを一覧で確認できます。")
+    cat_map = {
+        "fixed_total": "固定費",
+        "required_profit_total": "必要利益",
+        "net_workers": "工数前提",
+        "minutes_per_day": "工数前提",
+        "standard_daily_minutes": "工数前提",
+        "annual_minutes": "工数前提",
+        "break_even_rate": "賃率",
+        "required_rate": "賃率",
+        "daily_be_va": "付加価値",
+        "daily_req_va": "付加価値",
+    }
+    df_break = pd.DataFrame(
+        [
+            (
+                cat_map.get(n["key"], ""),
+                n["label"],
+                n["value"],
+                n.get("unit", ""),
+                n["formula"],
+                ", ".join(n["depends_on"]),
             )
-            st.dataframe(styled, use_container_width=True)
-        else:
-            st.info("前月データがありません。")
+            for n in nodes.values()
+        ],
+        columns=["区分", "項目", "値", "単位", "式", "依存要素"],
+    )
+    st.dataframe(df_break, use_container_width=True)
 
-st.subheader("ブレークダウン")
-st.caption("各指標の計算式と、どの入力が影響しているかを一覧で確認できます。")
-cat_map = {
-    "fixed_total": "固定費",
-    "required_profit_total": "必要利益",
-    "net_workers": "工数前提",
-    "minutes_per_day": "工数前提",
-    "standard_daily_minutes": "工数前提",
-    "annual_minutes": "工数前提",
-    "break_even_rate": "賃率",
-    "required_rate": "賃率",
-    "daily_be_va": "付加価値",
-    "daily_req_va": "付加価値",
-}
-df_break = pd.DataFrame(
-    [
-        (
-            cat_map.get(n["key"], ""),
-            n["label"],
-            n["value"],
-            n.get("unit", ""),
-            n["formula"],
-            ", ".join(n["depends_on"]),
-        )
-        for n in nodes.values()
-    ],
-    columns=["区分", "項目", "値", "単位", "式", "依存要素"],
-)
-st.dataframe(df_break, use_container_width=True)
+    st.subheader("感度分析")
+    st.caption("主要な入力を増減させたときに賃率がどのように変わるかを可視化します。")
+    fig = plot_sensitivity(params)
+    st.pyplot(fig)
 
-st.subheader("感度分析")
-st.caption("主要な入力を増減させたときに賃率がどのように変わるかを可視化します。")
-fig = plot_sensitivity(params)
-st.pyplot(fig)
+    df_csv = pd.DataFrame(list(nodes.values()))
+    df_csv["depends_on"] = df_csv["depends_on"].apply(lambda x: ",".join(x))
+    csv = df_csv.to_csv(index=False, encoding="utf-8-sig")
+    st.download_button(
+        "CSVエクスポート",
+        data=csv,
+        file_name=f"standard_rate__{current}.csv",
+        mime="text/csv",
+    )
 
-df_csv = pd.DataFrame(list(nodes.values()))
-df_csv["depends_on"] = df_csv["depends_on"].apply(lambda x: ",".join(x))
-csv = df_csv.to_csv(index=False, encoding="utf-8-sig")
-st.download_button("CSVエクスポート", data=csv, file_name=f"standard_rate__{current}.csv", mime="text/csv")
+    pdf_bytes = generate_pdf(nodes, fig)
+    st.download_button(
+        "PDFエクスポート",
+        data=pdf_bytes,
+        file_name=f"standard_rate_summary__{current}.pdf",
+        mime="application/pdf",
+    )
 
-pdf_bytes = generate_pdf(nodes, fig)
-st.download_button("PDFエクスポート", data=pdf_bytes, file_name=f"standard_rate_summary__{current}.pdf", mime="application/pdf")
+    excel_bytes = build_excel_report(params, nodes, variance_state, variance_df)
+    st.download_button(
+        "Excelエクスポート",
+        data=excel_bytes,
+        file_name=f"standard_rate_report__{current}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    render_wizard_nav(current_step, location="bottom")
 
 sync_offline_cache()
