@@ -14,7 +14,7 @@ from standard_rate_core import (
     compute_rates,
     build_reverse_index,
 )
-from utils import compute_results, summarize_segment_performance
+from rate_utils import compute_results, summarize_segment_performance
 
 
 def test_compute_rates_basic():

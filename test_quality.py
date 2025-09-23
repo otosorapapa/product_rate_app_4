@@ -2,7 +2,7 @@ from io import BytesIO
 
 import pandas as pd
 
-from utils import (
+from rate_utils import (
     detect_anomalies,
     detect_quality_issues,
     generate_product_template,

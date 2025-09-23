@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parents[1]
 if str(BASE_DIR) not in sys.path:
-    # Ensure our project root takes precedence so we import the local utils module
+    # Ensure our project root takes precedence so we import the local rate_utils module
     # instead of any similarly named third-party package that might exist.
     sys.path.insert(0, str(BASE_DIR))
 
@@ -18,7 +18,7 @@ from plotly.subplots import make_subplots
 from urllib.parse import urlencode
 from datetime import date, datetime
 
-from utils import (
+from rate_utils import (
     compute_results,
     detect_quality_issues,
     detect_anomalies,

@@ -22,7 +22,7 @@ from data_integrations import (
     load_transactions_for_sync,
     summarize_transactions,
 )
-from utils import (
+from rate_utils import (
     generate_product_template,
     get_product_template_guide,
     get_template_field_anchor,
