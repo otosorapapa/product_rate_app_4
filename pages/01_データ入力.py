@@ -65,9 +65,12 @@ if restored_from_cache and should_show_restore_notice():
 
 st.subheader("Excelテンプレート")
 st.markdown(
-    "テンプレートには必須項目の説明とサンプル値を記載しています。"
+    "テンプレートには必須項目の説明とサンプル値、入力単位を記載しています。"
     " 自社データを入力する前にダウンロードし、列名と単位を変更しないようご注意ください。"
+    " アップロード時には必須項目の欠損や単位の誤りを自動チェックします。"
 )
+
+st.caption("欠損や単位の不備がある場合は、エラー一覧の『対処方法』を参考にすれば対応先がすぐに分かります。")
 
 guide_df = get_product_template_guide()
 st.table(guide_df)
@@ -134,6 +137,7 @@ if file is not None or "df_products_raw" not in st.session_state:
 
     if not detail_df.empty:
         with st.expander("検知されたデータ品質アラートの詳細", expanded=bool(errors)):
+            st.caption("※ 各行の『対処方法』に、確認先や修正のヒントを記載しています。")
             st.dataframe(detail_df, use_container_width=True)
 
     if errors:
