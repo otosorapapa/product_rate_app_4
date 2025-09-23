@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from io import BytesIO
+from typing import Dict, List, Any, Tuple, Optional, Callable
+
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Any, Tuple, Optional, Callable
+
 
 
 CATEGORY_KEYWORDS = {
@@ -31,6 +33,203 @@ CATEGORY_KEYWORDS = {
         "抹茶",
     ],
 }
+
+
+_BASE_PRODUCT_HEADER = [
+    "製品№",
+    "製品名",
+    "実際売単価",
+    "原価（材料費）",
+    "リードタイム",
+    "日産製造数（個数）",
+    "カテゴリー",
+    "主要顧客",
+    "備考",
+]
+
+_BASE_PRODUCT_UNITS = [
+    "コード",
+    "名称",
+    "円/個",
+    "円/個",
+    "分/個",
+    "個/日",
+    "テキスト",
+    "テキスト",
+    "任意",
+]
+
+_BASE_PRODUCT_SAMPLES_GENERAL = [
+    ["P-1001", "苺大福", 320, 120, 4.5, 800, "和菓子", "量販店B社", "既存ラインA"],
+    ["P-1002", "栗大福", 280, 110, 3.8, 600, "和菓子", "百貨店A社", "新規投入予定"],
+]
+
+_BASE_HYOCHIN_ROWS = [
+    {"項目": "労務費", "区分": "", "値": 24_000_000, "補足": ""},
+    {"項目": "販管費", "区分": "", "値": 12_000_000, "補足": ""},
+    {"項目": "借入返済", "区分": "", "値": 3_600_000, "補足": ""},
+    {"項目": "納税", "区分": "", "値": 3_000_000, "補足": ""},
+    {"項目": "未来事業費", "区分": "", "値": 1_200_000, "補足": ""},
+    {"項目": "直接工員数", "区分": "正社員", "値": 25, "補足": ""},
+    {"項目": "直接工員数", "区分": "準社員➀", "値": 8, "補足": ""},
+    {"項目": "直接工員数", "区分": "準社員②", "値": 5, "補足": ""},
+    {"項目": "直接工員数", "区分": "労働係数", "値": 0.8, "補足": "準社員②の労働係数"},
+    {"項目": "年間稼働日数", "区分": "", "値": 250, "補足": ""},
+    {"項目": "1日当り稼働時間", "区分": "", "値": 7.5, "補足": ""},
+    {"項目": "1日当り操業度", "区分": "", "値": 0.85, "補足": ""},
+]
+
+
+def _apply_hyochin_overrides(
+    base_rows: List[Dict[str, Any]], overrides: Optional[Dict[Any, Any]]
+) -> List[Dict[str, Any]]:
+    """Return a copy of ``base_rows`` with overrides applied."""
+
+    rows = [row.copy() for row in base_rows]
+    if not overrides:
+        return rows
+
+    for row in rows:
+        key = row.get("項目")
+        subkey = row.get("区分") or None
+        value = None
+        if (key, subkey) in overrides:
+            value = overrides[(key, subkey)]
+        elif key in overrides:
+            value = overrides[key]
+        if value is None:
+            continue
+        if isinstance(value, dict):
+            row.update(value)
+        else:
+            row["値"] = value
+
+    return rows
+
+
+TEMPLATE_INDUSTRY_PRESETS: Dict[str, Dict[str, Any]] = {
+    "general": {
+        "label": "共通テンプレート（和菓子サンプル）",
+        "description": "既存のテンプレート。まずは構成を確認したい方向けの標準サンプルです。",
+        "product_samples": _BASE_PRODUCT_SAMPLES_GENERAL,
+        "hyochin_overrides": {},
+        "fermi_assumptions": [
+            {"項目": "年間稼働日数", "推定値": 250, "単位": "日/年", "根拠": "週休2日＋大型連休を想定"},
+            {"項目": "1日当たり稼働時間", "推定値": 7.5, "単位": "時間/日", "根拠": "1シフト8時間から休憩を除外"},
+            {"項目": "固定費合計", "推定値": 43_800_000, "単位": "円/年", "根拠": "労務費・販管費などの合算"},
+        ],
+    },
+    "manufacturing": {
+        "label": "製造業（汎用ライン想定）",
+        "description": "樹脂・金属加工などの多品種少量ラインを想定したフェルミ推定値です。",
+        "product_samples": [
+            [
+                "M-2301",
+                "樹脂ギア",
+                820,
+                310,
+                6.2,
+                420,
+                "機械部品",
+                "Tier1サプライヤー",
+                "自動機ラインA",
+            ],
+            [
+                "M-2302",
+                "精密ブラケット",
+                1_280,
+                540,
+                8.1,
+                280,
+                "金属加工",
+                "自動車OEM",
+                "複合加工セル",
+            ],
+        ],
+        "hyochin_overrides": {
+            "労務費": 25_000_000,
+            "販管費": 12_000_000,
+            "借入返済": 8_500_000,
+            "納税": 5_600_000,
+            "未来事業費": 6_010_000,
+            "年間稼働日数": 236,
+            "1日当り稼働時間": 8.68,
+            "1日当り操業度": 0.9,
+        },
+        "fermi_assumptions": [
+            {"項目": "年間稼働日数", "推定値": 236, "単位": "日/年", "根拠": "繁忙期の土曜稼働と大型連休を織り込む"},
+            {"項目": "1日当たり稼働時間", "推定値": 8.68, "単位": "時間/日", "根拠": "2直制＋段取時間を含む実働"},
+            {"項目": "固定費合計", "推定値": 57_110_000, "単位": "円/年", "根拠": "労務費等のフェルミ推定"},
+        ],
+    },
+    "food_processing": {
+        "label": "食品加工業（セントラルキッチン）",
+        "description": "日配品を製造する中小規模の食品加工工場を想定した初期値です。",
+        "product_samples": [
+            [
+                "F-5101",
+                "惣菜セットA",
+                460,
+                210,
+                3.4,
+                1_200,
+                "惣菜",
+                "量販店C社",
+                "日勤ライン1",
+            ],
+            [
+                "F-5102",
+                "デリサラダB",
+                380,
+                150,
+                2.8,
+                1_600,
+                "サラダ",
+                "コンビニPB",
+                "夜勤ラインB",
+            ],
+        ],
+        "hyochin_overrides": {
+            "労務費": 19_800_000,
+            "販管費": 8_200_000,
+            "借入返済": 2_400_000,
+            "納税": 1_800_000,
+            "未来事業費": 960_000,
+            "年間稼働日数": 280,
+            "1日当り稼働時間": 7.0,
+            "1日当り操業度": 0.92,
+        },
+        "fermi_assumptions": [
+            {"項目": "年間稼働日数", "推定値": 280, "単位": "日/年", "根拠": "繁忙期対応で祝日も稼働"},
+            {"項目": "1日当たり稼働時間", "推定値": 7.0, "単位": "時間/日", "根拠": "日勤＋夜間仕込の平均"},
+            {"項目": "固定費合計", "推定値": 33_160_000, "単位": "円/年", "根拠": "人件費・光熱費の概算"},
+        ],
+    },
+}
+
+
+def list_template_presets() -> List[Dict[str, Any]]:
+    """Return available template presets with metadata."""
+
+    presets: List[Dict[str, Any]] = []
+    for key, config in TEMPLATE_INDUSTRY_PRESETS.items():
+        presets.append(
+            {
+                "key": key,
+                "label": config.get("label", key),
+                "description": config.get("description", ""),
+                "fermi_assumptions": config.get("fermi_assumptions", []),
+                "product_samples": config.get("product_samples", []),
+                "hyochin_overrides": config.get("hyochin_overrides", {}),
+            }
+        )
+    return presets
+
+
+def get_template_preset(key: str) -> Dict[str, Any]:
+    """Return the preset configuration for ``key`` falling back to ``general``."""
+
+    return TEMPLATE_INDUSTRY_PRESETS.get(key, TEMPLATE_INDUSTRY_PRESETS["general"])
 
 
 def split_column_and_unit(value: Any) -> Tuple[Any, Optional[str]]:
@@ -430,6 +629,7 @@ TEMPLATE_FIELD_GUIDE: List[Dict[str, Any]] = [
         "単位/形式": "コード",
         "必須": "必須",
         "サンプル値": "P-1001",
+        "アンカー": "template-field-product_no",
     },
     {
         "Excel列名": "製品名",
@@ -437,6 +637,7 @@ TEMPLATE_FIELD_GUIDE: List[Dict[str, Any]] = [
         "単位/形式": "テキスト",
         "必須": "必須",
         "サンプル値": "苺大福",
+        "アンカー": "template-field-product_name",
     },
     {
         "Excel列名": "実際売単価",
@@ -444,6 +645,7 @@ TEMPLATE_FIELD_GUIDE: List[Dict[str, Any]] = [
         "単位/形式": "円/個",
         "必須": "必須",
         "サンプル値": 320,
+        "アンカー": "template-field-actual_unit_price",
     },
     {
         "Excel列名": "原価（材料費）",
@@ -451,6 +653,7 @@ TEMPLATE_FIELD_GUIDE: List[Dict[str, Any]] = [
         "単位/形式": "円/個",
         "必須": "必須",
         "サンプル値": 120,
+        "アンカー": "template-field-material_unit_cost",
     },
     {
         "Excel列名": "リードタイム",
@@ -458,6 +661,7 @@ TEMPLATE_FIELD_GUIDE: List[Dict[str, Any]] = [
         "単位/形式": "分/個",
         "必須": "必須",
         "サンプル値": 4.5,
+        "アンカー": "template-field-minutes_per_unit",
     },
     {
         "Excel列名": "日産製造数（個数）",
@@ -465,6 +669,7 @@ TEMPLATE_FIELD_GUIDE: List[Dict[str, Any]] = [
         "単位/形式": "個/日",
         "必須": "必須",
         "サンプル値": 800,
+        "アンカー": "template-field-daily_qty",
     },
     {
         "Excel列名": "カテゴリー",
@@ -472,6 +677,7 @@ TEMPLATE_FIELD_GUIDE: List[Dict[str, Any]] = [
         "単位/形式": "テキスト",
         "必須": "推奨",
         "サンプル値": "和菓子",
+        "アンカー": "template-field-category",
     },
     {
         "Excel列名": "主要顧客",
@@ -479,6 +685,7 @@ TEMPLATE_FIELD_GUIDE: List[Dict[str, Any]] = [
         "単位/形式": "テキスト",
         "必須": "推奨",
         "サンプル値": "量販店B社",
+        "アンカー": "template-field-major_customer",
     },
     {
         "Excel列名": "備考",
@@ -486,8 +693,66 @@ TEMPLATE_FIELD_GUIDE: List[Dict[str, Any]] = [
         "単位/形式": "任意",
         "必須": "任意",
         "サンプル値": "既存ラインA",
+        "アンカー": "template-field-notes",
     },
 ]
+
+
+_TEMPLATE_FIELD_LOOKUP: Dict[str, Dict[str, Any]] = {
+    entry["Excel列名"]: entry for entry in TEMPLATE_FIELD_GUIDE
+}
+
+TEMPLATE_LABEL_TO_EXCEL_COLUMN: Dict[str, str] = {
+    "製品番号": "製品№",
+    "製品名": "製品名",
+    "販売単価（円/個）": "実際売単価",
+    "材料費（円/個）": "原価（材料費）",
+    "リードタイム（分/個）": "リードタイム",
+    "日産数（個/日）": "日産製造数（個数）",
+    "カテゴリー": "カテゴリー",
+    "主要顧客": "主要顧客",
+    "備考": "備考",
+    "実際売単価": "実際売単価",
+    "原価（材料費）": "原価（材料費）",
+    "リードタイム": "リードタイム",
+    "日産製造数（個数）": "日産製造数（個数）",
+}
+
+
+def get_product_template_guide() -> pd.DataFrame:
+    """Return a DataFrame describing the Excel input template columns."""
+
+    return pd.DataFrame(TEMPLATE_FIELD_GUIDE)
+
+
+def get_template_field_info(label: str) -> Optional[Dict[str, Any]]:
+    """Return template metadata for the given validation label."""
+
+    if label in _TEMPLATE_FIELD_LOOKUP:
+        info = _TEMPLATE_FIELD_LOOKUP[label].copy()
+        info["excel_column"] = label
+        return info
+
+    excel_label = TEMPLATE_LABEL_TO_EXCEL_COLUMN.get(label)
+    if not excel_label:
+        return None
+
+    entry = _TEMPLATE_FIELD_LOOKUP.get(excel_label)
+    if not entry:
+        return {"excel_column": excel_label}
+
+    info = entry.copy()
+    info["excel_column"] = excel_label
+    return info
+
+
+def get_template_field_anchor(label: str) -> Optional[str]:
+    """Return the anchor identifier for a template field label if available."""
+
+    info = get_template_field_info(label)
+    if not info:
+        return None
+    return info.get("アンカー")
 
 
 UNIT_EXPECTATIONS: Dict[str, Dict[str, Any]] = {
@@ -540,52 +805,29 @@ UNIT_EXPECTATIONS: Dict[str, Dict[str, Any]] = {
         "mismatch_action": "月間・年間数量の場合は日割りに換算し、テンプレートの単位行を{expected}に修正してください。",
     },
 }
+def generate_product_template(industry_key: str = "general") -> bytes:
+    """Generate a starter Excel workbook for product data entry.
 
-
-def get_product_template_guide() -> pd.DataFrame:
-    """Return a DataFrame describing the Excel input template columns."""
-
-    return pd.DataFrame(TEMPLATE_FIELD_GUIDE)
-
-
-def generate_product_template() -> bytes:
-    """Generate a starter Excel workbook for product data entry."""
+    Parameters
+    ----------
+    industry_key : str, optional
+        Preset key defined in :data:`TEMPLATE_INDUSTRY_PRESETS`. When omitted,
+        the 共通テンプレート is used.
+    """
 
     guide_df = get_product_template_guide()
+    preset = get_template_preset(industry_key)
 
-    product_header = [
-        "製品№",
-        "製品名",
-        "実際売単価",
-        "原価（材料費）",
-        "リードタイム",
-        "日産製造数（個数）",
-        "カテゴリー",
-        "主要顧客",
-        "備考",
-    ]
-    product_units = ["コード", "名称", "円/個", "円/個", "分/個", "個/日", "テキスト", "テキスト", "任意"]
-    product_samples = [
-        ["P-1001", "苺大福", 320, 120, 4.5, 800, "和菓子", "量販店B社", "既存ラインA"],
-        ["P-1002", "栗大福", 280, 110, 3.8, 600, "和菓子", "百貨店A社", "新規投入予定"],
-    ]
-    product_rows = [product_header, product_units, *product_samples]
+    product_samples = preset.get("product_samples") or _BASE_PRODUCT_SAMPLES_GENERAL
+    product_rows = [_BASE_PRODUCT_HEADER, _BASE_PRODUCT_UNITS, *product_samples]
     template_df = pd.DataFrame(product_rows)
 
     hyochin_columns = ["", "項目", "区分", "値", "補足"]
+    hyochin_rows_dicts = _apply_hyochin_overrides(
+        _BASE_HYOCHIN_ROWS, preset.get("hyochin_overrides")
+    )
     hyochin_rows = [
-        ["", "労務費", "", 24_000_000, ""],
-        ["", "販管費", "", 12_000_000, ""],
-        ["", "借入返済", "", 3_600_000, ""],
-        ["", "納税", "", 3_000_000, ""],
-        ["", "未来事業費", "", 1_200_000, ""],
-        ["", "直接工員数", "正社員", 25, ""],
-        ["", "", "準社員➀", 8, ""],
-        ["", "", "準社員②", 5, ""],
-        ["", "", "労働係数", 0.8, "準社員②の労働係数"],
-        ["", "年間稼働日数", "", 250, ""],
-        ["", "1日当り稼働時間", "", 7.5, ""],
-        ["", "1日当り操業度", "", 0.85, ""],
+        ["", row.get("項目"), row.get("区分"), row.get("値"), row.get("補足")] for row in hyochin_rows_dicts
     ]
     hyochin_df = pd.DataFrame(hyochin_rows, columns=hyochin_columns)
 

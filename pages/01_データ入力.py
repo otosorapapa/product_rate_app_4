@@ -6,9 +6,12 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from datetime import date, datetime, timedelta
+from io import BytesIO
+from typing import Any, Dict, List
 
-import streamlit as st
+import numpy as np
 import pandas as pd
+import streamlit as st
 from data_integrations import (
     IntegrationConfig,
     SUPPORTED_ACCOUNTING_APPS,
@@ -20,17 +23,21 @@ from data_integrations import (
     summarize_transactions,
 )
 from utils import (
-    read_excel_safely,
-    parse_hyochin,
-    parse_products,
     generate_product_template,
     get_product_template_guide,
-    validate_product_dataframe,
+    get_template_field_anchor,
+    get_template_field_info,
     infer_category_from_name,
     infer_major_customer,
+    list_template_presets,
+    parse_hyochin,
+    parse_products,
+    read_excel_safely,
+    validate_product_dataframe,
 )
 from components import (
     apply_user_theme,
+    render_glossary_popover,
     render_help_button,
     render_onboarding,
     render_page_tutorial,
@@ -43,6 +50,21 @@ from offline import (
     should_show_restore_notice,
     sync_offline_cache,
 )
+
+
+def _format_fermi_value(value: Any) -> str:
+    if pd.isna(value):
+        return ""
+    if isinstance(value, (int, np.integer)):
+        return f"{int(value):,}"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if abs(number - round(number)) < 1e-6:
+        return f"{int(round(number)):,}"
+    return f"{number:,.2f}"
+
 
 apply_user_theme()
 
@@ -71,23 +93,69 @@ if restored_from_cache and should_show_restore_notice():
     st.caption("通信が不安定な環境でもサイドバーの『オフラインモード』から最新版を更新できます。")
     mark_restore_notice_shown()
 
-st.subheader("Excelテンプレート")
+template_header_col, template_help_col = st.columns([0.74, 0.26], gap="small")
+with template_header_col:
+    st.subheader("Excelテンプレート")
+with template_help_col:
+    render_glossary_popover(
+        ["必要賃率", "ブレークイーブン賃率", "付加価値/分"],
+        label="関連用語の解説",
+        container=template_help_col,
+    )
+
 st.markdown(
     "テンプレートには必須項目の説明とサンプル値、入力単位を記載しています。"
     " 自社データを入力する前にダウンロードし、列名と単位を変更しないようご注意ください。"
     " アップロード時には必須項目の欠損や単位の誤りを自動チェックします。"
 )
 
-st.caption("欠損や単位の不備がある場合は、エラー一覧の『対処方法』を参考にすれば対応先がすぐに分かります。")
+presets = list_template_presets()
+preset_keys = [preset["key"] for preset in presets]
+preset_label_map = {preset["key"]: preset["label"] for preset in presets}
+default_key = st.session_state.get("template_preset_key", "general")
+if default_key not in preset_label_map:
+    default_key = "general"
+default_index = preset_keys.index(default_key) if default_key in preset_keys else 0
+selected_key = st.selectbox(
+    "業種別のサンプル値を選択",
+    options=preset_keys,
+    index=default_index,
+    key="template_preset_key",
+    format_func=lambda key: preset_label_map.get(key, key),
+)
+selected_preset = next((preset for preset in presets if preset["key"] == selected_key), presets[0])
+
+if selected_preset.get("description"):
+    st.caption(f"想定シナリオ: {selected_preset['description']}")
+
+fermi_records = selected_preset.get("fermi_assumptions") or []
+if fermi_records:
+    fermi_df = pd.DataFrame(fermi_records)
+    fermi_display = fermi_df.copy()
+    if "推定値" in fermi_display.columns:
+        fermi_display["推定値"] = fermi_display["推定値"].apply(_format_fermi_value)
+    st.dataframe(fermi_display, use_container_width=True)
+    st.caption("※ 推定値は一般的なフェルミ推定です。自社の実績値で上書きしてください。")
 
 guide_df = get_product_template_guide()
-st.table(guide_df)
+guide_display = guide_df[["Excel列名", "説明", "単位/形式", "必須", "サンプル値"]]
+st.dataframe(guide_display, use_container_width=True)
 
-template_bytes = generate_product_template()
+with st.expander("列別の記入ポイントを詳しく見る", expanded=False):
+    st.caption("テンプレート列と同じ順番で記入方法をまとめています。")
+    for row in guide_df.to_dict("records"):
+        anchor = row.get("アンカー")
+        if anchor:
+            st.markdown(f"<div id='{anchor}'></div>", unsafe_allow_html=True)
+        st.markdown(f"**{row['Excel列名']}** ({row['単位/形式']})")
+        st.caption(row["説明"])
+        st.caption(f"サンプル値: {row['サンプル値']}")
+
+template_bytes = generate_product_template(selected_key)
 st.download_button(
     "📄 製品マスタ入力テンプレートをダウンロード",
     data=template_bytes,
-    file_name="product_master_template.xlsx",
+    file_name=f"product_master_template_{selected_key}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
@@ -163,6 +231,124 @@ if file is not None or "df_products_raw" not in st.session_state:
 
         df_products.attrs["column_unit_info"] = unit_info
 
+    column_unit_info = df_products.attrs.get("column_unit_info")
+    if not isinstance(column_unit_info, dict):
+        column_unit_info = {}
+
+    column_labels = {
+        "product_no": "製品番号",
+        "product_name": "製品名",
+        "actual_unit_price": "販売単価（円/個）",
+        "material_unit_cost": "材料費（円/個）",
+        "minutes_per_unit": "分/個",
+        "daily_qty": "日産数（個/日）",
+        "category": "カテゴリー",
+        "major_customer": "主要顧客",
+        "notes": "備考",
+    }
+    derived_labels = {
+        "gp_per_unit": "粗利（円/個）",
+        "daily_total_minutes": "日産合計時間（分）",
+        "daily_va": "日次付加価値（円）",
+        "va_per_min": "付加価値/分（円）",
+    }
+    number_formats = {
+        "actual_unit_price": "%.2f",
+        "material_unit_cost": "%.2f",
+        "minutes_per_unit": "%.2f",
+        "daily_qty": "%.0f",
+        "gp_per_unit": "%.2f",
+        "daily_total_minutes": "%.2f",
+        "daily_va": "%.2f",
+        "va_per_min": "%.2f",
+    }
+    derived_help = {
+        "gp_per_unit": "販売単価−材料費で自動計算されます。",
+        "daily_total_minutes": "分/個×日産数で自動計算されます。",
+        "daily_va": "粗利×日産数で自動計算されます。",
+        "va_per_min": "日次付加価値÷合計時間で自動計算されます。",
+    }
+
+    column_config: Dict[str, Any] = {}
+    for col, label in column_labels.items():
+        if col not in df_products.columns:
+            continue
+        info = get_template_field_info(label)
+        help_text = info.get("説明") if info else None
+        if col in {"actual_unit_price", "material_unit_cost", "minutes_per_unit", "daily_qty"}:
+            column_config[col] = st.column_config.NumberColumn(
+                label,
+                help=help_text,
+                format=number_formats.get(col),
+            )
+        else:
+            column_config[col] = st.column_config.TextColumn(label, help=help_text)
+    for col, label in derived_labels.items():
+        if col not in df_products.columns:
+            continue
+        column_config[col] = st.column_config.NumberColumn(
+            label,
+            format=number_formats.get(col),
+            help=derived_help.get(col),
+            disabled=True,
+        )
+
+    edited_df = df_products
+    with st.expander("アプリ内で直接編集・追加入力", expanded=False):
+        st.caption(
+            "Excelに戻らずに主要列を更新できます。数値はテンプレートと同じ単位で入力してください。"
+        )
+        edited_df = st.data_editor(
+            df_products,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="inline_products_editor",
+            column_config=column_config,
+            hide_index=True,
+        )
+        export_buffer = BytesIO()
+        export_df = edited_df.copy()
+        export_df.to_excel(export_buffer, index=False, sheet_name="products")
+        st.download_button(
+            "編集内容をExcelでエクスポート",
+            data=export_buffer.getvalue(),
+            file_name="edited_products.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
+    if isinstance(edited_df, pd.DataFrame):
+        df_products = edited_df.copy()
+    else:
+        df_products = pd.DataFrame(edited_df)
+    df_products.attrs["column_unit_info"] = column_unit_info
+
+    numeric_cols = [
+        "actual_unit_price",
+        "material_unit_cost",
+        "minutes_per_unit",
+        "daily_qty",
+        "gp_per_unit",
+        "daily_total_minutes",
+        "daily_va",
+        "va_per_min",
+    ]
+    for col in numeric_cols:
+        if col in df_products.columns:
+            df_products[col] = pd.to_numeric(df_products[col], errors="coerce")
+
+    if {"actual_unit_price", "material_unit_cost"}.issubset(df_products.columns):
+        df_products["gp_per_unit"] = df_products["actual_unit_price"] - df_products["material_unit_cost"]
+    if {"minutes_per_unit", "daily_qty"}.issubset(df_products.columns):
+        df_products["daily_total_minutes"] = df_products["minutes_per_unit"] * df_products["daily_qty"]
+    if {"gp_per_unit", "daily_qty"}.issubset(df_products.columns):
+        df_products["daily_va"] = df_products["gp_per_unit"] * df_products["daily_qty"]
+    if {"daily_va", "daily_total_minutes"}.issubset(df_products.columns):
+        with np.errstate(divide="ignore", invalid="ignore"):
+            df_products["va_per_min"] = df_products["daily_va"] / df_products["daily_total_minutes"].replace(
+                {0: np.nan}
+            )
+
     errors, val_warnings, detail_df = validate_product_dataframe(df_products)
     for msg in val_warnings:
         st.warning(msg)
@@ -170,9 +356,68 @@ if file is not None or "df_products_raw" not in st.session_state:
         st.error(msg)
 
     if not detail_df.empty:
+        level_map = {"エラー": "致命的", "警告": "注意"}
+        display_df = detail_df.copy()
+        display_df["重要度"] = display_df["レベル"].map(level_map).fillna(display_df["レベル"])
+        display_df["Excel列"] = display_df["項目"].map(
+            lambda label: (info := get_template_field_info(label)) and info.get("excel_column")
+        )
+        display_df["入力ガイド"] = display_df["項目"].map(
+            lambda label: get_template_field_anchor(label) or ""
+        )
+        display_df = display_df.drop(columns=["レベル"])
+        ordered_columns = [
+            "重要度",
+            "製品番号",
+            "製品名",
+            "項目",
+            "Excel列",
+            "原因/状況",
+            "入力値",
+            "対処方法",
+            "入力ガイド",
+        ]
+        display_df = display_df[[col for col in ordered_columns if col in display_df.columns]]
+
+        def _highlight_issue(row: pd.Series) -> List[str]:
+            level = row.get("重要度")
+            color = "#FDEAEA" if level == "致命的" else "#FFF7E1"
+            return [f"background-color: {color}"] * len(row)
+
+        def _format_anchor_cell(anchor: str) -> str:
+            if not anchor:
+                return "―"
+            return f'<a href="#{anchor}">テンプレート列へ移動</a>'
+
+        styled = display_df.style.apply(_highlight_issue, axis=1).format(
+            {"入力ガイド": _format_anchor_cell}, escape=False
+        )
         with st.expander("検知されたデータ品質アラートの詳細", expanded=bool(errors)):
-            st.caption("※ 各行の『対処方法』に、確認先や修正のヒントを記載しています。")
-            st.dataframe(detail_df, use_container_width=True)
+            st.caption("致命的な項目は赤、注意項目は黄でハイライトしています。")
+            st.markdown(styled.to_html(index=False), unsafe_allow_html=True)
+            option_labels = [
+                f"{row.get('重要度', '-') } | {row.get('項目', '-') } | {row.get('製品番号', '全体')}"
+                for row in display_df.to_dict("records")
+            ]
+            if option_labels:
+                with st.popover("🛠️ 修正ヒントを確認"):
+                    st.caption("対象行を選ぶと原因と修正方法を表示します。")
+                    selected_index = st.selectbox(
+                        "対象行",
+                        options=list(range(len(option_labels))),
+                        format_func=lambda idx: option_labels[idx],
+                    )
+                    issue_row = detail_df.iloc[int(selected_index)]
+                    st.markdown(
+                        f"**対象製品:** {issue_row.get('製品番号', '全体')} {issue_row.get('製品名', '')}"
+                    )
+                    st.markdown(f"**原因/状況:** {issue_row.get('原因/状況')}")
+                    st.markdown(f"**対処方法:** {issue_row.get('対処方法')}")
+                    anchor = get_template_field_anchor(issue_row.get("項目", ""))
+                    info = get_template_field_info(issue_row.get("項目", ""))
+                    if anchor:
+                        label_text = info.get("excel_column") if info else issue_row.get("項目")
+                        st.markdown(f"[テンプレート『{label_text}』の説明に移動](#{anchor})")
 
     if errors:
         st.stop()

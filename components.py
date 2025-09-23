@@ -1,5 +1,6 @@
 import json
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 import streamlit as st
 from streamlit.delta_generator import DeltaGenerator
@@ -260,6 +261,43 @@ _GLOSSARY: Dict[str, str] = {
     "シナリオ": "前提条件のセットを保存したもの。複数登録するとダッシュボードで比較できます。",
     "感度分析": "前提条件を変えたときに賃率指標がどの程度変動するかを可視化する分析手法です。",
 }
+
+
+def render_glossary_popover(
+    terms: List[str],
+    *,
+    label: str = "用語の説明",
+    container: Optional[DeltaGenerator] = None,
+) -> None:
+    """Display a popover listing glossary entries for the provided terms."""
+
+    if not terms:
+        return
+
+    unique_terms: List[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        if term in _GLOSSARY and term not in seen:
+            unique_terms.append(term)
+            seen.add(term)
+
+    if not unique_terms:
+        return
+
+    target = container or st
+    title = f"📘 {label}"
+    glossary_url_base = f"{_DEMO_URL}#glossary"
+
+    with target.popover(title):
+        st.caption("主要な用語の定義とリンクをまとめました。")
+        for term in unique_terms:
+            description = _GLOSSARY.get(term, "")
+            st.markdown(f"**{term}**")
+            if description:
+                st.write(description)
+            term_url = f"{glossary_url_base}?term={quote(term)}"
+            st.markdown(f"[{term}の用語集を開く]({term_url})")
+
 
 _PAGE_TUTORIALS: Dict[str, Dict[str, Any]] = {
     "home": {
