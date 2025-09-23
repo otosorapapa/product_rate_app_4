@@ -115,3 +115,19 @@ def test_parse_products_retains_unit_metadata_from_template():
     assert info
     assert info["actual_unit_price"]["unit"] == "円/個"
     assert info["minutes_per_unit"]["unit"] == "分/個"
+
+
+def test_generate_product_template_overrides_industry_defaults():
+    template_bytes = generate_product_template("manufacturing")
+    xls = pd.ExcelFile(BytesIO(template_bytes))
+    hyochin_df = pd.read_excel(xls, sheet_name="標賃", header=None)
+
+    working_days = hyochin_df.loc[hyochin_df[1] == "年間稼働日数", 3].iloc[0]
+    daily_hours = hyochin_df.loc[hyochin_df[1] == "1日当り稼働時間", 3].iloc[0]
+    fixed_total = hyochin_df.loc[
+        hyochin_df[1].isin(["労務費", "販管費", "借入返済", "納税", "未来事業費"]), 3
+    ].sum()
+
+    assert working_days == 236
+    assert round(float(daily_hours), 2) == 8.68
+    assert int(round(float(fixed_total))) == 57_110_000
