@@ -401,8 +401,13 @@ apply_user_theme()
 
 restore_session_state_from_cache()
 render_sidebar_nav(page_key="chat")
-st.title("④ チャットボット / FAQ")
-render_help_button("chat")
+
+header_col, help_col = st.columns([0.78, 0.22], gap="small")
+with header_col:
+    st.title("④ チャットボット / FAQ")
+    st.caption("取り込んだデータをもとに、賃率や価格に関する疑問へ即時回答します。")
+
+render_help_button("chat", container=help_col)
 render_onboarding()
 render_page_tutorial("chat")
 
@@ -410,8 +415,6 @@ if st.session_state.pop("chat_sample_notice", False):
     st.info("製品データが未設定だったためサンプル data/sample.xlsx を読み込みました。")
 if st.session_state.pop("chat_reset_notice", False):
     st.success("チャット履歴をクリアしました。")
-
-st.caption("取り込んだデータをもとに、賃率や価格に関する疑問へ即時回答します。")
 
 df_results, rate_results, scenario_name = _prepare_context()
 if df_results.empty:

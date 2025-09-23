@@ -13,9 +13,12 @@ apply_user_theme()
 
 render_sidebar_nav(page_key="home")
 
-st.title("製品賃率ダッシュボード")
-st.caption("📊 Excel（標賃 / R6.12）から賃率KPIを自動計算し、SKU別の達成状況を可視化します。")
-render_help_button("home")
+header_col, help_col = st.columns([0.82, 0.18], gap="small")
+with header_col:
+    st.title("製品賃率ダッシュボード")
+    st.caption("📊 Excel（標賃 / R6.12）から賃率KPIを自動計算し、SKU別の達成状況を可視化します。")
+
+render_help_button("home", container=help_col)
 
 render_onboarding()
 

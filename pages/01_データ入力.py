@@ -42,9 +42,13 @@ from offline import (
 
 apply_user_theme()
 
-st.title("① データ入力 & 取り込み")
 render_sidebar_nav(page_key="data")
-render_help_button("data")
+
+header_col, help_col = st.columns([0.78, 0.22], gap="small")
+with header_col:
+    st.title("① データ入力 & 取り込み")
+
+render_help_button("data", container=help_col)
 
 render_onboarding()
 render_page_tutorial("data")

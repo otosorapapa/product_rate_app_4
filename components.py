@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
+from streamlit.delta_generator import DeltaGenerator
 
 from offline import render_offline_controls
 
@@ -35,12 +36,22 @@ _THEME_PALETTES: Dict[str, Dict[str, str]] = {
         "muted": "#7B6651",
         "description": "目に優しい生成りカラー。長時間の閲覧でも疲れにくい落ち着いた配色です。",
     },
+    "くっきり（白×黒）": {
+        "background": "#FFFFFF",
+        "surface": "#F8FAFC",
+        "text": "#101828",
+        "accent": "#B42318",
+        "border": "#CBD5E1",
+        "muted": "#475569",
+        "description": "白地に濃色のテキストでコントラストを最大化したテーマです。印刷物と同じ感覚で閲覧できます。",
+    },
 }
 
 _FONT_SCALE_OPTIONS: Dict[str, float] = {
     "ふつう": 1.0,
     "大きめ": 1.15,
     "特大": 1.3,
+    "超特大": 1.45,
 }
 
 _HELP_CONTENT: Dict[str, Dict[str, Any]] = {
@@ -53,8 +64,18 @@ _HELP_CONTENT: Dict[str, Dict[str, Any]] = {
             "オンボーディングと画面チュートリアルで操作手順を確認できます。",
         ],
         "tips": [
-            "サイドバー下部の『表示設定』から文字サイズと配色を変更できます。",
+            "サイドバー下部の『👁 アクセシビリティ設定』から文字サイズと配色を変更できます。",
             "ガイドを閉じてもサイドバーの『👀 ガイドを再表示』でいつでも呼び出せます。",
+        ],
+        "faqs": [
+            {
+                "question": "最初にどのページを操作すればよいですか？",
+                "answer": "左サイドバーの『① データ入力 & 取り込み』からExcelを読み込むと、ダッシュボードや感度分析にもデータが共有されます。",
+            },
+            {
+                "question": "ヘルプやガイドを後から見直す方法はありますか？",
+                "answer": "サイドバー最下部付近の『👀 ガイドを再表示』ボタンを押すと、オンボーディングと各ページのチュートリアルをいつでも再表示できます。",
+            },
         ],
     },
     "data": {
@@ -69,6 +90,16 @@ _HELP_CONTENT: Dict[str, Dict[str, Any]] = {
             "検索ボックスで製品番号や名称を素早く絞り込みできます。",
             "『新規製品を追加』フォームから不足しているSKUを直接入力できます。",
         ],
+        "faqs": [
+            {
+                "question": "Excelが読み込めない場合はどうすれば良いですか？",
+                "answer": "テンプレートの列名やシート構成が変更されていないか確認し、必要に応じてサンプルテンプレートをダウンロードし直してコピーしてください。エラー一覧には想定される原因と対処のヒントが表示されます。",
+            },
+            {
+                "question": "読み込んだ固定費や必要利益の設定は保存されますか？",
+                "answer": "ブラウザのセッションに保存されるため、ページを移動しても同じ端末・ブラウザであれば設定が引き継がれます。通信が不安定な場合はサイドバーの『オフラインモード』から手動保存も可能です。",
+            },
+        ],
     },
     "dashboard": {
         "title": "ダッシュボード画面のヘルプ",
@@ -81,6 +112,16 @@ _HELP_CONTENT: Dict[str, Dict[str, Any]] = {
         "tips": [
             "ダッシュボード画面右上の❓をクリックすると、各チャートの意味と使い方を確認できます。",
             "サイドバーの『グラフ操作オプション』でガイド線やレンジスライダーの表示を切り替えられます。",
+        ],
+        "faqs": [
+            {
+                "question": "『必要賃率差』はどのように解釈すれば良いですか？",
+                "answer": "必要賃率から現在の付加価値/分を引いた値です。プラスの場合は必要賃率に届いていないため改善余地があり、マイナスの場合は達成済みを意味します。",
+            },
+            {
+                "question": "グラフを資料に貼り付けたいときはどうすれば良いですか？",
+                "answer": "Plotlyグラフは右上のカメラアイコンからPNGを保存できます。Altairグラフはメニューの『Download data』からデータをCSVとしてエクスポートし、PowerPoint等で再利用できます。",
+            },
         ],
     },
     "standard_rate": {
@@ -95,6 +136,16 @@ _HELP_CONTENT: Dict[str, Dict[str, Any]] = {
             "『PDF出力』で現在の前提条件と感度分析結果を資料として保存できます。",
             "感度グラフの凡例をクリックすると特定指標のみを強調表示できます。",
         ],
+        "faqs": [
+            {
+                "question": "シナリオはどのように保存・切り替えできますか？",
+                "answer": "右側のシナリオ管理で『シナリオを追加』を押すと現在の入力値を名前付きで保存できます。保存したシナリオはダッシュボード側でも選択でき、比較分析に活用できます。",
+            },
+            {
+                "question": "固定費や必要利益の入力単位が分かりません。",
+                "answer": "入力欄の単位は千円/年です。年間費用を千円単位で入力すると、必要賃率とブレークイーブン賃率が自動で再計算されます。",
+            },
+        ],
     },
     "chat": {
         "title": "チャットサポートのヘルプ",
@@ -107,6 +158,16 @@ _HELP_CONTENT: Dict[str, Dict[str, Any]] = {
         "tips": [
             "具体的な製品名や製品番号を含めると、必要販売単価を自動で算出します。",
             "回答履歴はセッション内で保持されます。『会話をリセット』で初期化できます。",
+        ],
+        "faqs": [
+            {
+                "question": "どのような質問に対応していますか？",
+                "answer": "取り込んだ製品データと標準賃率計算の結果を参照して、必要販売単価の算出や賃率差の解釈などを回答します。製品番号やシナリオ名を含めると精度が高まります。",
+            },
+            {
+                "question": "回答の根拠を確認するにはどうすれば良いですか？",
+                "answer": "AIの回答には参照した指標や計算式を含めるよう設計されています。より詳しく知りたい場合は『根拠を詳しく教えて』と追い質問すると、追加の説明を得られます。",
+            },
         ],
     },
 }
@@ -416,8 +477,23 @@ def get_active_theme_palette() -> Dict[str, str]:
     return _THEME_PALETTES.get(theme_key, _THEME_PALETTES[_DEFAULT_THEME_KEY]).copy()
 
 
-def render_help_button(page_key: str, *, align: str = "right") -> None:
-    """Render a modal help button tailored to ``page_key``."""
+def render_help_button(
+    page_key: str,
+    *,
+    align: str = "right",
+    container: Optional[DeltaGenerator] = None,
+) -> None:
+    """Render a modal help button tailored to ``page_key``.
+
+    Parameters
+    ----------
+    page_key:
+        ページ固有のヘルプコンテンツを識別するキー。
+    align:
+        ``container`` を指定しない場合の配置。 ``"right"`` で右寄せ、 ``"left"`` で左寄せになります。
+    container:
+        ボタンを表示する ``streamlit`` のコンテナ。タイトル横に配置したい場合に列や空コンテナを渡します。
+    """
 
     help_content = _HELP_CONTENT.get(page_key)
     if help_content is None:
@@ -427,39 +503,58 @@ def render_help_button(page_key: str, *, align: str = "right") -> None:
     if state_key not in st.session_state:
         st.session_state[state_key] = False
 
-    if align == "left":
-        button_col, _ = st.columns([0.3, 0.7])
+    if container is not None:
+        button_container = container
     else:
-        _, button_col = st.columns([0.7, 0.3])
+        if align == "left":
+            button_container, _ = st.columns([0.3, 0.7])
+        else:
+            _, button_container = st.columns([0.7, 0.3])
 
-    if button_col.button(
+    if button_container.button(
         "❓ ヘルプ",
         key=f"help_button_{page_key}",
         use_container_width=True,
-        help="画面の使い方を表示します。",
+        help="画面の使い方とFAQを表示します。",
+        type="primary",
     ):
         st.session_state[state_key] = True
 
     if not st.session_state.get(state_key):
         return
 
+    def _render_help_sections() -> None:
+        st.markdown(f"**{help_content['intro']}**")
+
+        steps: List[str] = help_content.get("steps", [])
+        if steps:
+            st.markdown("**操作手順**")
+            steps_md = "\n".join(
+                f"{idx}. {text}" for idx, text in enumerate(steps, start=1)
+            )
+            st.markdown(steps_md)
+
+        tips: List[str] = help_content.get("tips", [])
+        if tips:
+            st.markdown("**ヒント**")
+            for tip in tips:
+                st.markdown(f"- {tip}")
+
+        faqs: List[Dict[str, str]] = help_content.get("faqs", [])
+        if faqs:
+            st.markdown("**よくある質問**")
+            for faq in faqs:
+                question = faq.get("question")
+                answer = faq.get("answer")
+                if not question or not answer:
+                    continue
+                st.markdown(f"**Q. {question}**")
+                st.markdown(answer)
+
     modal = getattr(st, "modal", None)
     if callable(modal):
         with modal(help_content["title"]):
-            st.markdown(f"**{help_content['intro']}**")
-
-            steps: List[str] = help_content.get("steps", [])
-            if steps:
-                steps_md = "\n".join(
-                    f"{idx}. {text}" for idx, text in enumerate(steps, start=1)
-                )
-                st.markdown(steps_md)
-
-            tips: List[str] = help_content.get("tips", [])
-            if tips:
-                st.markdown("**ヒント**")
-                for tip in tips:
-                    st.markdown(f"- {tip}")
+            _render_help_sections()
 
             if st.button(
                 "閉じる",
@@ -469,13 +564,7 @@ def render_help_button(page_key: str, *, align: str = "right") -> None:
                 st.session_state[state_key] = False
     else:  # pragma: no cover - fallback for older Streamlit versions
         with st.expander(help_content["title"], expanded=True):
-            st.markdown(f"**{help_content['intro']}**")
-            for idx, text in enumerate(help_content.get("steps", []), start=1):
-                st.markdown(f"{idx}. {text}")
-            if help_content.get("tips"):
-                st.markdown("**ヒント**")
-                for tip in help_content["tips"]:
-                    st.markdown(f"- {tip}")
+            _render_help_sections()
         st.session_state[state_key] = False
 
 
@@ -599,15 +688,20 @@ def render_sidebar_nav(*, page_key: Optional[str] = None) -> None:
                 st.sidebar.caption(f"{term}: {_GLOSSARY[term]}")
 
     st.sidebar.divider()
-    st.sidebar.subheader("表示設定")
+    st.sidebar.subheader("👁 アクセシビリティ設定")
+    st.sidebar.caption(
+        "視認性が気になる場合は、ここから配色と文字サイズを調整してください。設定は同じブラウザで保持されます。"
+    )
+
     theme_options = list(_THEME_PALETTES.keys())
     selected_theme = st.sidebar.selectbox(
         "配色テーマ",
         theme_options,
         key="ui_theme",
-        help="背景色とアクセントカラーの組み合わせを切り替えます。視認性が高いテーマを選んでください。",
+        help="背景色とアクセントカラーの組み合わせを切り替えます。コントラストが強いテーマほど文字がくっきり表示されます。",
     )
-    st.sidebar.caption(_THEME_PALETTES[selected_theme]["description"])
+    palette_preview = _THEME_PALETTES[selected_theme]
+    st.sidebar.caption(palette_preview["description"])
 
     font_options = list(_FONT_SCALE_OPTIONS.keys())
     selected_font = st.sidebar.radio(
@@ -618,6 +712,19 @@ def render_sidebar_nav(*, page_key: Optional[str] = None) -> None:
     )
     st.sidebar.caption(
         f"現在の文字サイズ: **{selected_font}** ／ 選択は同一ブラウザ内で保持されます。"
+    )
+
+    font_scale = _FONT_SCALE_OPTIONS[selected_font]
+    preview_font_px = round(16 * font_scale, 1)
+    preview_small_px = round(preview_font_px * 0.85, 1)
+    st.sidebar.markdown(
+        f"""
+        <div style="margin-top:0.4rem; padding:0.7rem 0.85rem; border-radius:12px; border:1px solid {palette_preview['border']}; background:{palette_preview['surface']}; color:{palette_preview['text']}; font-size:{preview_font_px}px; line-height:1.6;">
+            <div style="font-weight:700;">Aa あア 123</div>
+            <div style="font-size:{preview_small_px}px; color:{palette_preview['muted']}; margin-top:0.25rem;">現在のテーマと文字サイズのプレビューです。</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
     st.sidebar.caption(_ONBOARDING_EFFECT)

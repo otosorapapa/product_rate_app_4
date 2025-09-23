@@ -236,9 +236,13 @@ apply_user_theme()
 
 restore_session_state_from_cache()
 
-st.title("③ 標準賃率 計算/感度分析")
 render_sidebar_nav(page_key="standard_rate")
-render_help_button("standard_rate")
+
+header_col, help_col = st.columns([0.76, 0.24], gap="small")
+with header_col:
+    st.title("③ 標準賃率 計算/感度分析")
+
+render_help_button("standard_rate", container=help_col)
 
 render_onboarding()
 render_page_tutorial("standard_rate")
