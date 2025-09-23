@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, Tuple, TypedDict, Set
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, TypedDict
 
 import numpy as np
 import pandas as pd
@@ -30,7 +30,7 @@ class Node(TypedDict, total=False):
     value: float
     formula: str
     depends_on: List[str]
-    unit: str | None
+    unit: Optional[str]
 
 def build_node(
     key: str,
@@ -38,7 +38,7 @@ def build_node(
     value: float,
     formula: str,
     depends_on: List[str],
-    unit: str | None = None,
+    unit: Optional[str] = None,
 ) -> Node:
     return Node(
         key=key,
@@ -54,7 +54,7 @@ class FormulaSpec:
     label: str
     formula: str
     depends_on: List[str]
-    unit: str | None
+    unit: Optional[str]
     func: Callable[[Dict[str, Node], Dict[str, float]], float]
 
 FORMULAS: Dict[str, FormulaSpec] = {
@@ -132,9 +132,9 @@ FORMULAS: Dict[str, FormulaSpec] = {
 
 FORMULA_KEYS = list(FORMULAS.keys())
 
-def sanitize_params(params: Dict[str, float]) -> tuple[Dict[str, float], list[str]]:
+def sanitize_params(params: Dict[str, float]) -> Tuple[Dict[str, float], List[str]]:
     sanitized = {**DEFAULT_PARAMS}
-    warnings: list[str] = []
+    warnings: List[str] = []
     for k, default in DEFAULT_PARAMS.items():
         raw = params.get(k, default)
         try:
@@ -181,8 +181,10 @@ def compute_rates(params: Dict[str, float]):
     flat = {k: v["value"] for k, v in nodes.items()}
     return nodes, flat
 
-def build_reverse_index(nodes: Dict[str, Node]) -> Dict[str, list[str]]:
-    dep_map: Dict[str, set[str]] = { key: set(node["depends_on"]) for key, node in nodes.items() }
+def build_reverse_index(nodes: Dict[str, Node]) -> Dict[str, List[str]]:
+    dep_map: Dict[str, Set[str]] = {
+        key: set(node["depends_on"]) for key, node in nodes.items()
+    }
     changed = True
     while changed:
         changed = False
@@ -193,7 +195,7 @@ def build_reverse_index(nodes: Dict[str, Node]) -> Dict[str, list[str]]:
             if not extra.issubset(deps):
                 deps |= extra
                 changed = True
-    reverse: Dict[str, list[str]] = {}
+    reverse: Dict[str, List[str]] = {}
     for node_key, deps in dep_map.items():
         for dep in deps:
             reverse.setdefault(dep, []).append(node_key)
@@ -213,7 +215,7 @@ def compute_profit_margin_share(results: Dict[str, float]) -> float:
 def build_sensitivity_table(
     params: Dict[str, float],
     *,
-    percent_grid: Iterable[float] | None = None,
+    percent_grid: Optional[Iterable[float]] = None,
 ) -> pd.DataFrame:
     """Create a table of scenario results for labour cost and time variations."""
 
@@ -223,7 +225,7 @@ def build_sensitivity_table(
         if percent_grid is not None
         else [float(x) for x in np.arange(-20, 25, 5)]
     )
-    records: list[dict[str, float]] = []
+    records: List[Dict[str, float]] = []
 
     for pct in grid:
         factor = 1.0 + pct / 100.0
