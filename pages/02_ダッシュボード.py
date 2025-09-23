@@ -800,6 +800,20 @@ def _prepare_trend_dataframe(trend_df: pd.DataFrame, freq: str) -> pd.DataFrame:
     return df[["scenario", "period", "ach_rate", "va_per_min", "required_rate", "be_rate", "note", "recorded_at"]]
 
 
+def _format_period_label(value: Any, freq: str) -> str:
+    """Format a timestamp for display based on the selected frequency."""
+
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "-"
+    try:
+        ts = pd.Timestamp(value)
+    except Exception:
+        return str(value)
+    if freq == "四半期":
+        return str(ts.to_period("Q"))
+    return ts.strftime("%Y-%m")
+
+
 def _build_yoy_summary(trend_df: pd.DataFrame, scenarios: List[str]) -> List[str]:
     """Create human-friendly YoY comparison sentences for the latest month."""
 
@@ -1972,6 +1986,17 @@ def _render_target_badge(col, text: str) -> None:
     )
 
 
+def _format_segment_prefix(segment: Any, label: str) -> str:
+    """Return a natural language prefix for segment commentary."""
+
+    seg = "未設定" if segment in [None, "", "nan"] else str(segment)
+    if label == "カテゴリー":
+        return f"カテゴリー『{seg}』"
+    if label == "主要顧客":
+        return f"主要顧客『{seg}』向け商品"
+    return f"{seg}{label}"
+
+
 def _compose_segment_insight(summary_df: pd.DataFrame, label: str) -> str:
     if summary_df is None or summary_df.empty:
         return f"{label}別のデータがありません。Excelに{label}列を追加してください。"
@@ -1988,18 +2013,18 @@ def _compose_segment_insight(summary_df: pd.DataFrame, label: str) -> str:
 
     if abs_best <= tol:
         first = (
-            f"{best['segment']}{label}は平均VA/分が{best['avg_va_per_min']:.1f}円で"
+            f"{_format_segment_prefix(best['segment'], label)}は平均VA/分が{best['avg_va_per_min']:.1f}円で"
             f"必要賃率とほぼ同水準です（達成率{best['ach_rate_pct']:.1f}%）。"
         )
     elif diff_best > 0:
         first = (
-            f"{best['segment']}{label}は平均VA/分が{best['avg_va_per_min']:.1f}円で"
+            f"{_format_segment_prefix(best['segment'], label)}は平均VA/分が{best['avg_va_per_min']:.1f}円で"
             f"必要賃率を{abs_best:.1f}円上回っているため利益率が高い"
             f"（達成率{best['ach_rate_pct']:.1f}%）。"
         )
     else:
         first = (
-            f"{best['segment']}{label}は平均VA/分が{best['avg_va_per_min']:.1f}円で"
+            f"{_format_segment_prefix(best['segment'], label)}は平均VA/分が{best['avg_va_per_min']:.1f}円で"
             f"必要賃率を{abs_best:.1f}円下回っているため収益性に課題があります"
             f"（達成率{best['ach_rate_pct']:.1f}%）。"
         )
@@ -2012,7 +2037,7 @@ def _compose_segment_insight(summary_df: pd.DataFrame, label: str) -> str:
         worst = negatives.sort_values("avg_gap").iloc[0]
         diff_worst = float(abs(worst.get("avg_gap", 0.0)))
         second = (
-            f"一方、{worst['segment']}{label}は平均VA/分が{worst['avg_va_per_min']:.1f}円で"
+            f"一方、{_format_segment_prefix(worst['segment'], label)}は平均VA/分が{worst['avg_va_per_min']:.1f}円で"
             f"必要賃率を{diff_worst:.1f}円下回っています"
         )
         roi = worst.get("avg_roi_months")
@@ -2050,7 +2075,7 @@ def _build_segment_highlights(summary_df: pd.DataFrame, label: str) -> List[str]
         row = positive.iloc[0]
         gap_val = abs(float(row["avg_gap"]))
         highlights.append(
-            f"{row['segment']}{label}は必要賃率を{gap_val:.1f}円上回り、達成率は{row['ach_rate_pct']:.1f}%です。"
+            f"{_format_segment_prefix(row['segment'], label)}は必要賃率を{gap_val:.1f}円上回り、達成率は{row['ach_rate_pct']:.1f}%です。"
         )
 
     negative = df[df["avg_gap"] < -tol].sort_values("avg_gap")
@@ -2062,7 +2087,7 @@ def _build_segment_highlights(summary_df: pd.DataFrame, label: str) -> List[str]
         if roi is not None and not pd.isna(roi):
             roi_txt = f"（未達SKUの平均ROI {float(roi):.1f}ヶ月）"
         highlights.append(
-            f"{row['segment']}{label}は必要賃率を{gap_val:.1f}円下回っており改善余地があります{roi_txt}。"
+            f"{_format_segment_prefix(row['segment'], label)}は必要賃率を{gap_val:.1f}円下回っており改善余地があります{roi_txt}。"
         )
 
     if not highlights:
@@ -2756,6 +2781,7 @@ with tabs[1]:
             if plot_df.empty:
                 st.warning("表示対象の時系列データが不足しています。")
             else:
+                pdca_df = _build_pdca_summary(plot_df)
                 yoy_lines = _build_yoy_summary(
                     trend_df,
                     sorted(plot_df["scenario"].unique()),
@@ -2763,6 +2789,21 @@ with tabs[1]:
                 if yoy_lines:
                     st.markdown("**前年同月比**")
                     st.markdown("\n".join(f"- {line}" for line in yoy_lines))
+                if not pdca_df.empty:
+                    latest_records = (
+                        pdca_df.sort_values("period")
+                        .groupby("scenario", as_index=False)
+                        .tail(1)
+                        .sort_values("scenario")
+                    )
+                    if not latest_records.empty:
+                        st.markdown("**最新PDCAステータス**")
+                        st.markdown(
+                            "\n".join(
+                                f"- {row['scenario']}（{_format_period_label(row['period'], freq_choice)}）: {row['pdca_comment']}"
+                                for _, row in latest_records.iterrows()
+                            )
+                        )
                 fig_ts = make_subplots(specs=[[{"secondary_y": True}]])
                 scenario_colors = {
                     scen: PASTEL_PALETTE[idx % len(PASTEL_PALETTE)]
@@ -2835,10 +2876,9 @@ with tabs[1]:
                 st.plotly_chart(fig_ts, use_container_width=True, config=_build_plotly_config())
 
                 display_df = plot_df.copy()
-                if freq_choice == "四半期":
-                    display_df["期間"] = display_df["period"].dt.to_period("Q").astype(str)
-                else:
-                    display_df["期間"] = display_df["period"].dt.strftime("%Y-%m")
+                display_df["期間"] = display_df["period"].map(
+                    lambda v: _format_period_label(v, freq_choice)
+                )
                 display_df = display_df.sort_values(["period", "scenario"])
                 summary_table = pd.DataFrame(
                     {
@@ -2860,13 +2900,11 @@ with tabs[1]:
                 )
                 st.dataframe(summary_table, use_container_width=True)
 
-                pdca_df = _build_pdca_summary(plot_df)
                 if not pdca_df.empty:
                     display_pdca = pdca_df.copy()
-                    if freq_choice == "四半期":
-                        display_pdca["期間"] = display_pdca["period"].dt.to_period("Q").astype(str)
-                    else:
-                        display_pdca["期間"] = display_pdca["period"].dt.strftime("%Y-%m")
+                    display_pdca["期間"] = display_pdca["period"].map(
+                        lambda v: _format_period_label(v, freq_choice)
+                    )
                     display_pdca["P(必要賃率)"] = display_pdca["required_rate"].map(
                         lambda x: f"{x:.3f}" if pd.notna(x) else "-"
                     )
