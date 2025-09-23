@@ -1,5 +1,5 @@
 import pandas as pd
-from utils import detect_quality_issues
+from rate_utils import detect_quality_issues
 
 
 def test_detect_quality_issues():

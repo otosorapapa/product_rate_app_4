@@ -20,7 +20,7 @@ from components import (
 )
 from offline import restore_session_state_from_cache, sync_offline_cache
 from standard_rate_core import DEFAULT_PARAMS, compute_rates, sanitize_params
-from utils import (
+from rate_utils import (
     compute_results,
     infer_category_from_name,
     infer_major_customer,
