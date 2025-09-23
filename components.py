@@ -1,3 +1,4 @@
+import json
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
@@ -5,8 +6,17 @@ from streamlit.delta_generator import DeltaGenerator
 
 from offline import render_offline_controls
 
+try:  # pragma: no cover - optional bridge used only when available at runtime
+    from streamlit_js_eval import streamlit_js_eval
+except ModuleNotFoundError:  # pragma: no cover - allows tests to run without the dependency
+    streamlit_js_eval = None  # type: ignore[misc]
+
 _DEFAULT_THEME_KEY = "標準（ブルー）"
 _DEFAULT_FONT_KEY = "ふつう"
+
+_ACCESSIBILITY_STORAGE_KEY = "rate_app_accessibility_prefs_v1"
+_ACCESSIBILITY_JS_PREFIX = "accessibility_prefs"
+_ACCESSIBILITY_PREFS_FLAG = "_accessibility_prefs_loaded"
 
 _THEME_PALETTES: Dict[str, Dict[str, str]] = {
     "標準（ブルー）": {
@@ -53,6 +63,56 @@ _FONT_SCALE_OPTIONS: Dict[str, float] = {
     "特大": 1.3,
     "超特大": 1.45,
 }
+
+
+def _call_accessibility_js(expression: str, suffix: str) -> Optional[Any]:
+    """Execute ``expression`` in the browser when :mod:`streamlit_js_eval` is available."""
+
+    if streamlit_js_eval is None:  # pragma: no cover - bridge not installed during tests
+        return None
+    key = f"{_ACCESSIBILITY_JS_PREFIX}_{suffix}"
+    try:
+        return streamlit_js_eval(js_expressions=expression, key=key)
+    except Exception:  # pragma: no cover - runtime JS errors should not break the app
+        return None
+
+
+def _load_accessibility_prefs() -> Optional[Dict[str, str]]:
+    """Return stored accessibility preferences from the browser, if any."""
+
+    raw = _call_accessibility_js(
+        f"window.localStorage.getItem('{_ACCESSIBILITY_STORAGE_KEY}')",
+        "get",
+    )
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    result: Dict[str, str] = {}
+    theme = data.get("theme")
+    font = data.get("font")
+    if isinstance(theme, str):
+        result["theme"] = theme
+    if isinstance(font, str):
+        result["font"] = font
+    return result or None
+
+
+def _persist_accessibility_prefs(theme_key: str, font_key: str) -> None:
+    """Persist the active theme and font selection to local storage."""
+
+    if streamlit_js_eval is None:  # pragma: no cover - JS bridge unavailable in tests
+        return
+    payload = {"theme": theme_key, "font": font_key}
+    payload_json = json.dumps(payload, ensure_ascii=False)
+    _call_accessibility_js(
+        f"window.localStorage.setItem('{_ACCESSIBILITY_STORAGE_KEY}', JSON.stringify({payload_json}))",
+        "set",
+    )
 
 _HELP_CONTENT: Dict[str, Dict[str, Any]] = {
     "home": {
@@ -272,6 +332,17 @@ _PAGE_TUTORIALS: Dict[str, Dict[str, Any]] = {
 
 def _ensure_theme_state() -> None:
     """Ensure theme-related options exist in :mod:`streamlit` session state."""
+
+    if not st.session_state.get(_ACCESSIBILITY_PREFS_FLAG):
+        stored = _load_accessibility_prefs()
+        if stored:
+            theme_pref = stored.get("theme")
+            font_pref = stored.get("font")
+            if isinstance(theme_pref, str) and theme_pref in _THEME_PALETTES:
+                st.session_state["ui_theme"] = theme_pref
+            if isinstance(font_pref, str) and font_pref in _FONT_SCALE_OPTIONS:
+                st.session_state["ui_font_scale"] = font_pref
+        st.session_state[_ACCESSIBILITY_PREFS_FLAG] = True
 
     theme_key = st.session_state.get("ui_theme", _DEFAULT_THEME_KEY)
     if theme_key not in _THEME_PALETTES:
@@ -689,9 +760,14 @@ def render_sidebar_nav(*, page_key: Optional[str] = None) -> None:
 
     st.sidebar.divider()
     st.sidebar.subheader("👁 アクセシビリティ設定")
-    st.sidebar.caption(
-        "視認性が気になる場合は、ここから配色と文字サイズを調整してください。設定は同じブラウザで保持されます。"
-    )
+    caption_lines = [
+        "視認性が気になる場合は、ここから配色と文字サイズを調整してください。",
+    ]
+    if streamlit_js_eval is not None:
+        caption_lines.append("設定は同じブラウザで保持されます。")
+    else:
+        caption_lines.append("ブラウザ保存が利用できない環境では、設定はセッション終了時にリセットされます。")
+    st.sidebar.caption("\n".join(caption_lines))
 
     theme_options = list(_THEME_PALETTES.keys())
     selected_theme = st.sidebar.selectbox(
@@ -710,8 +786,12 @@ def render_sidebar_nav(*, page_key: Optional[str] = None) -> None:
         key="ui_font_scale",
         help="本文・見出し・テーブルをまとめて拡大します。大きいほど読みやすくなります。",
     )
+    if streamlit_js_eval is not None:
+        persistence_note = "選択は同一ブラウザ内で保持されます。"
+    else:
+        persistence_note = "選択はページ再読み込みで初期化されます。"
     st.sidebar.caption(
-        f"現在の文字サイズ: **{selected_font}** ／ 選択は同一ブラウザ内で保持されます。"
+        f"現在の文字サイズ: **{selected_font}** ／ {persistence_note}"
     )
 
     font_scale = _FONT_SCALE_OPTIONS[selected_font]
@@ -726,6 +806,8 @@ def render_sidebar_nav(*, page_key: Optional[str] = None) -> None:
         """,
         unsafe_allow_html=True,
     )
+
+    _persist_accessibility_prefs(selected_theme, selected_font)
 
     st.sidebar.caption(_ONBOARDING_EFFECT)
 
