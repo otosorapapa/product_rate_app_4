@@ -33,6 +33,12 @@ from components import (
     render_stepper,
     render_sidebar_nav,
 )
+from offline import (
+    mark_restore_notice_shown,
+    restore_session_state_from_cache,
+    should_show_restore_notice,
+    sync_offline_cache,
+)
 
 apply_user_theme()
 
@@ -43,6 +49,19 @@ render_help_button("data")
 render_onboarding()
 render_page_tutorial("data")
 render_stepper(1)
+
+restored_from_cache = False
+if "df_products_raw" not in st.session_state:
+    restored_from_cache = restore_session_state_from_cache()
+
+if restored_from_cache and should_show_restore_notice():
+    timestamp = st.session_state.get("offline_cache_timestamp")
+    if timestamp:
+        st.success(f"ブラウザに保存していた {timestamp} 時点のデータを復元しました。")
+    else:
+        st.success("ブラウザに保存していた直近のデータを復元しました。")
+    st.caption("通信が不安定な環境でもサイドバーの『オフラインモード』から最新版を更新できます。")
+    mark_restore_notice_shown()
 
 st.subheader("Excelテンプレート")
 st.markdown(
@@ -409,3 +428,5 @@ if history:
         st.dataframe(history_df, use_container_width=True)
 
 st.success("保存しました。上部のナビから『ダッシュボード』へ進んでください。")
+
+sync_offline_cache()

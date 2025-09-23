@@ -16,6 +16,7 @@ from components import (
 import os
 from textwrap import dedent
 from openai import OpenAI
+from offline import restore_session_state_from_cache, sync_offline_cache
 
 
 def _explain_standard_rate(
@@ -232,6 +233,8 @@ from standard_rate_core import (
 )
 
 apply_user_theme()
+
+restore_session_state_from_cache()
 
 st.title("③ 標準賃率 計算/感度分析")
 render_sidebar_nav(page_key="standard_rate")
@@ -656,3 +659,5 @@ st.download_button("CSVエクスポート", data=csv, file_name=f"standard_rate_
 
 pdf_bytes = generate_pdf(nodes, fig)
 st.download_button("PDFエクスポート", data=pdf_bytes, file_name=f"standard_rate_summary__{current}.pdf", mime="application/pdf")
+
+sync_offline_cache()
