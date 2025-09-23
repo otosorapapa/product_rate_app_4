@@ -879,6 +879,9 @@ with st.expander("💾 シナリオ管理", expanded=False):
     else:
         st.caption("保存済みシナリオはまだありません。下で名前を入力して保存してください。")
 
+    if st.session_state.pop("scenario_manager_clear_input", False):
+        st.session_state["scenario_save_name"] = ""
+
     new_name = st.text_input(
         "シナリオ名",
         key="scenario_save_name",
@@ -899,8 +902,8 @@ with st.expander("💾 シナリオ管理", expanded=False):
                 "type": "success",
                 "message": f"{trimmed} を保存しました。",
             }
-    st.session_state["scenario_save_name"] = ""
-    st.rerun()
+            st.session_state["scenario_manager_clear_input"] = True
+            st.rerun()
 
 scenario_template = df_view_filtered.copy()
 df_base, base_metrics = _simulate_scenario(
