@@ -226,6 +226,107 @@ def _pct_change(previous: float, current: float) -> float:
     return (current / previous - 1.0) * 100.0
 
 
+def _determine_pdca_comment(
+    *, required_rate: float, va_per_min: float, delta_va: float, delta_ach: float
+) -> str:
+    """Generate a PDCA oriented commentary for KPI trend tracking."""
+
+    tol = 0.05  # 5銭単位の微細な変化はノイズとして扱う
+    if pd.isna(va_per_min) or pd.isna(required_rate):
+        return "Plan: KPIが不足しているため基準値の再確認が必要です。"
+
+    gap = va_per_min - required_rate
+    improving = np.isfinite(delta_va) and delta_va > tol
+    worsening = np.isfinite(delta_va) and delta_va < -tol
+
+    if gap >= tol:
+        if improving:
+            return "Act: 必要賃率超過幅が広がっており改善を定着させています。"
+        return "Act: 必要賃率を上回っており現状維持フェーズです。"
+
+    if gap <= -tol:
+        if improving:
+            return "Check: まだ未達ですが改善傾向を確認できました。"
+        return "Do: 必要賃率を下回っているため追加施策の実行が必要です。"
+
+    if improving:
+        return "Check: 基準付近で改善が進んでいます。"
+    if worsening:
+        return "Do: 基準付近ですが悪化傾向のため注意が必要です。"
+
+    if np.isfinite(delta_ach) and abs(delta_ach) > 0.2:
+        if delta_ach > 0:
+            return "Check: 達成率が上昇しており施策効果を確認できています。"
+        return "Do: 達成率が低下しているため原因分析が求められます。"
+
+    return "Plan: 大きな変化はなく基準水準を維持しています。"
+
+
+def _build_pdca_summary(trend_df: pd.DataFrame) -> pd.DataFrame:
+    """Build PDCA commentary rows for each scenario-period combination."""
+
+    columns = [
+        "scenario",
+        "period",
+        "required_rate",
+        "va_per_min",
+        "ach_rate",
+        "delta_va",
+        "delta_ach",
+        "pdca_comment",
+    ]
+    if trend_df is None or trend_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    df = trend_df.copy()
+    df["period"] = pd.to_datetime(df["period"])
+    df = df.dropna(subset=["period"])
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    records: List[Dict[str, Any]] = []
+    for scenario, group in df.groupby("scenario"):
+        g = group.sort_values("period")
+        prev_va = np.nan
+        prev_ach = np.nan
+        for _, row in g.iterrows():
+            va = float(row.get("va_per_min", np.nan))
+            req = float(row.get("required_rate", np.nan))
+            ach = float(row.get("ach_rate", np.nan))
+            delta_va = (
+                va - prev_va
+                if np.isfinite(va) and np.isfinite(prev_va)
+                else np.nan
+            )
+            delta_ach = (
+                ach - prev_ach
+                if np.isfinite(ach) and np.isfinite(prev_ach)
+                else np.nan
+            )
+            comment = _determine_pdca_comment(
+                required_rate=req,
+                va_per_min=va,
+                delta_va=delta_va,
+                delta_ach=delta_ach,
+            )
+            records.append(
+                {
+                    "scenario": scenario,
+                    "period": row["period"],
+                    "required_rate": req,
+                    "va_per_min": va,
+                    "ach_rate": ach,
+                    "delta_va": delta_va,
+                    "delta_ach": delta_ach,
+                    "pdca_comment": comment,
+                }
+            )
+            prev_va = va if np.isfinite(va) else prev_va
+            prev_ach = ach if np.isfinite(ach) else prev_ach
+
+    return pd.DataFrame(records, columns=columns)
+
+
 def _sku_to_str(value: Any) -> str:
     """Normalize product numbers for consistent dictionary keys."""
 
@@ -1653,6 +1754,45 @@ def _compose_segment_insight(summary_df: pd.DataFrame, label: str) -> str:
     return f"{first} {second}"
 
 
+def _build_segment_highlights(summary_df: pd.DataFrame, label: str) -> List[str]:
+    """Create bullet style highlights for segment performance."""
+
+    if summary_df is None or summary_df.empty:
+        return []
+
+    df = summary_df.dropna(subset=["avg_gap"]).copy()
+    if df.empty:
+        return []
+
+    tol = 0.05
+    highlights: List[str] = []
+
+    positive = df[df["avg_gap"] > tol].sort_values("avg_gap", ascending=False)
+    if not positive.empty:
+        row = positive.iloc[0]
+        gap_val = abs(float(row["avg_gap"]))
+        highlights.append(
+            f"{row['segment']}{label}は必要賃率を{gap_val:.1f}円上回り、達成率は{row['ach_rate_pct']:.1f}%です。"
+        )
+
+    negative = df[df["avg_gap"] < -tol].sort_values("avg_gap")
+    if not negative.empty:
+        row = negative.iloc[0]
+        gap_val = abs(float(row["avg_gap"]))
+        roi = row.get("avg_roi_months")
+        roi_txt = ""
+        if roi is not None and not pd.isna(roi):
+            roi_txt = f"（未達SKUの平均ROI {float(roi):.1f}ヶ月）"
+        highlights.append(
+            f"{row['segment']}{label}は必要賃率を{gap_val:.1f}円下回っており改善余地があります{roi_txt}。"
+        )
+
+    if not highlights:
+        highlights.append(f"{label}別では必要賃率との差が小さく概ね基準水準です。")
+
+    return highlights
+
+
 def _render_segment_tab(
     summary_df: pd.DataFrame, label: str, req_rate: float
 ) -> None:
@@ -2247,6 +2387,17 @@ else:
 
 st.subheader("セグメント分析（カテゴリー/顧客）")
 st.caption("平均VA/分と必要賃率との差、達成率、ROIをセグメント単位で比較します。")
+
+insight_sections = [
+    ("カテゴリー", _build_segment_highlights(category_summary, "カテゴリー")),
+    ("主要顧客", _build_segment_highlights(customer_summary, "主要顧客")),
+]
+for section_label, bullets in insight_sections:
+    if not bullets:
+        continue
+    st.markdown(f"**{section_label}の注目ポイント**")
+    st.markdown("\n".join(f"- {line}" for line in bullets))
+
 segment_tabs = st.tabs(["カテゴリー別", "主要顧客別"])
 with segment_tabs[0]:
     _render_segment_tab(category_summary, "カテゴリー", req_rate)
@@ -2430,6 +2581,44 @@ with tabs[1]:
                     }
                 )
                 st.dataframe(summary_table, use_container_width=True)
+
+                pdca_df = _build_pdca_summary(plot_df)
+                if not pdca_df.empty:
+                    display_pdca = pdca_df.copy()
+                    if freq_choice == "四半期":
+                        display_pdca["期間"] = display_pdca["period"].dt.to_period("Q").astype(str)
+                    else:
+                        display_pdca["期間"] = display_pdca["period"].dt.strftime("%Y-%m")
+                    display_pdca["P(必要賃率)"] = display_pdca["required_rate"].map(
+                        lambda x: f"{x:.3f}" if pd.notna(x) else "-"
+                    )
+                    display_pdca["D(VA/分)"] = display_pdca["va_per_min"].map(
+                        lambda x: f"{x:.2f}" if pd.notna(x) else "-"
+                    )
+                    display_pdca["C(達成率)"] = display_pdca["ach_rate"].map(
+                        lambda x: f"{x:.1f}%" if pd.notna(x) else "-"
+                    )
+                    display_pdca["ΔVA/分"] = display_pdca["delta_va"].map(
+                        lambda x: f"{x:+.2f}" if pd.notna(x) else "-"
+                    )
+                    display_pdca["Δ達成率"] = display_pdca["delta_ach"].map(
+                        lambda x: f"{x:+.1f}pt" if pd.notna(x) else "-"
+                    )
+                    pdca_display_cols = [
+                        "シナリオ",
+                        "期間",
+                        "P(必要賃率)",
+                        "D(VA/分)",
+                        "C(達成率)",
+                        "ΔVA/分",
+                        "Δ達成率",
+                        "PDCAコメント",
+                    ]
+                    display_pdca = display_pdca.rename(
+                        columns={"scenario": "シナリオ", "pdca_comment": "PDCAコメント"}
+                    )[pdca_display_cols]
+                    st.markdown("**PDCAチェックリスト**")
+                    st.dataframe(display_pdca, use_container_width=True)
 
 with tabs[2]:
     c1, c2 = st.columns([1.2,1])
