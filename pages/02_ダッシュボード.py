@@ -387,16 +387,40 @@ def _format_delta(value: float, suffix: str) -> str:
 
 SIMULATION_PRESETS: Dict[str, Dict[str, Any]] = {
     "販売価格+5%": {
-        "adjustments": {"quick_price": 5, "quick_ct": 0, "quick_material": 0},
+        "adjustments": {
+            "quick_price": 5,
+            "quick_ct": 0,
+            "quick_material": 0,
+            "quick_volume": 0,
+        },
         "description": "すべての製品で販売単価を一律5%引き上げるケース",
     },
-    "労働時間-10%": {
-        "adjustments": {"quick_price": 0, "quick_ct": -10, "quick_material": 0},
-        "description": "1製品当たりの製造時間を10%圧縮するケース",
+    "リードタイム-10%": {
+        "adjustments": {
+            "quick_price": 0,
+            "quick_ct": -10,
+            "quick_material": 0,
+            "quick_volume": 0,
+        },
+        "description": "1製品当たりの製造時間（分/個）を10%圧縮するケース",
     },
     "材料費-3%": {
-        "adjustments": {"quick_price": 0, "quick_ct": 0, "quick_material": -3},
+        "adjustments": {
+            "quick_price": 0,
+            "quick_ct": 0,
+            "quick_material": -3,
+            "quick_volume": 0,
+        },
         "description": "原材料コストを平均で3%削減するケース",
+    },
+    "増産+15%": {
+        "adjustments": {
+            "quick_price": 0,
+            "quick_ct": 0,
+            "quick_material": 0,
+            "quick_volume": 15,
+        },
+        "description": "日産数を15%拡大するケース",
     },
 }
 
@@ -413,7 +437,7 @@ def apply_simulation_preset(label: str) -> None:
     st.session_state["active_simulation"] = label
 
 
-def _detect_simulation_label(qp: int, qc: int, qm: int) -> str:
+def _detect_simulation_label(qp: int, qc: int, qm: int, qv: int) -> str:
     """Return a human friendly label for the current quick adjustments."""
 
     for label, preset in SIMULATION_PRESETS.items():
@@ -422,15 +446,20 @@ def _detect_simulation_label(qp: int, qc: int, qm: int) -> str:
             adjustments.get("quick_price", 0) == qp
             and adjustments.get("quick_ct", 0) == qc
             and adjustments.get("quick_material", 0) == qm
+            and adjustments.get("quick_volume", 0) == qv
         ):
             return label
-    if qp == 0 and qc == 0 and qm == 0:
+    if qp == 0 and qc == 0 and qm == 0 and qv == 0:
         return "ベース"
     return "カスタム設定"
 
 
 def _resolve_scenario_label(
-    qp: int, qc: int, qm: int, saved: Optional[Dict[str, Dict[str, Any]]]
+    qp: int,
+    qc: int,
+    qm: int,
+    qv: int,
+    saved: Optional[Dict[str, Dict[str, Any]]],
 ) -> str:
     """Determine the most relevant scenario label for quick simulation values."""
 
@@ -440,9 +469,10 @@ def _resolve_scenario_label(
                 int(config.get("quick_price", 0)) == int(qp)
                 and int(config.get("quick_ct", 0)) == int(qc)
                 and int(config.get("quick_material", 0)) == int(qm)
+                and int(config.get("quick_volume", 0)) == int(qv)
             ):
                 return str(name)
-    return _detect_simulation_label(qp, qc, qm)
+    return _detect_simulation_label(qp, qc, qm, qv)
 
 
 def _simulate_scenario(
@@ -450,6 +480,7 @@ def _simulate_scenario(
     *,
     price_pct: float,
     ct_pct: float,
+    volume_pct: float,
     material_pct: float,
     be_rate: float,
     req_rate: float,
@@ -463,6 +494,8 @@ def _simulate_scenario(
         df_sim["actual_unit_price"] *= 1 + float(price_pct) / 100.0
     if ct_pct:
         df_sim["minutes_per_unit"] *= 1 + float(ct_pct) / 100.0
+    if volume_pct:
+        df_sim["daily_qty"] *= 1 + float(volume_pct) / 100.0
     if material_pct:
         df_sim["material_unit_cost"] *= 1 + float(material_pct) / 100.0
 
@@ -516,8 +549,173 @@ def _format_adjustment_summary(adjustments: Dict[str, Any]) -> str:
 
     qp = int(adjustments.get("quick_price", 0))
     qc = int(adjustments.get("quick_ct", 0))
+    qv = int(adjustments.get("quick_volume", 0))
     qm = int(adjustments.get("quick_material", 0))
-    return f"価格{qp:+d}%・CT{qc:+d}%・材料{qm:+d}%"
+    return f"価格{qp:+d}%・リードタイム{qc:+d}%・生産量{qv:+d}%・材料{qm:+d}%"
+
+
+def _safe_series_mean(series: Optional[pd.Series]) -> float:
+    """Return a finite mean value for the provided numeric series if possible."""
+
+    if series is None:
+        return float("nan")
+    cleaned = pd.to_numeric(series, errors="coerce")
+    cleaned = cleaned.replace([np.inf, -np.inf], np.nan).dropna()
+    if cleaned.empty:
+        return float("nan")
+    return float(cleaned.mean())
+
+
+def _analyze_driver_impacts(
+    df_template: pd.DataFrame,
+    df_base: pd.DataFrame,
+    base_metrics: Dict[str, float],
+    *,
+    price_pct: float,
+    ct_pct: float,
+    volume_pct: float,
+    material_pct: float,
+    be_rate: float,
+    req_rate: float,
+    delta_low: float,
+    delta_high: float,
+    working_days: float,
+) -> Tuple[pd.DataFrame, List[str]]:
+    """Simulate each adjustment factor independently and summarise KPI deltas."""
+
+    base_daily = float(base_metrics.get("daily_va_total", 0.0) or 0.0)
+    base_avg_va = _safe_series_mean(df_base.get("va_per_min"))
+    base_avg_gap = _safe_series_mean(df_base.get("rate_gap_vs_required"))
+    base_avg_req_price = _safe_series_mean(df_base.get("required_selling_price"))
+
+    driver_configs = [
+        ("販売価格", price_pct, "price"),
+        ("リードタイム", ct_pct, "lead_time"),
+        ("生産量", volume_pct, "volume"),
+        ("材料費", material_pct, "material"),
+    ]
+
+    records: List[Dict[str, Any]] = []
+    insights: List[str] = []
+    valid_working_days = (
+        working_days is not None and np.isfinite(working_days) and working_days > 0
+    )
+
+    for label, pct_value, key in driver_configs:
+        if pct_value in (None, 0) or not np.isfinite(float(pct_value)):
+            continue
+
+        kwargs = {
+            "price_pct": 0.0,
+            "ct_pct": 0.0,
+            "volume_pct": 0.0,
+            "material_pct": 0.0,
+        }
+        kwargs["price_pct"] = kwargs["price_pct"] if key != "price" else pct_value
+        kwargs["ct_pct"] = kwargs["ct_pct"] if key != "lead_time" else pct_value
+        kwargs["volume_pct"] = kwargs["volume_pct"] if key != "volume" else pct_value
+        kwargs["material_pct"] = (
+            kwargs["material_pct"] if key != "material" else pct_value
+        )
+
+        df_driver, driver_metrics = _simulate_scenario(
+            df_template,
+            price_pct=kwargs["price_pct"],
+            ct_pct=kwargs["ct_pct"],
+            volume_pct=kwargs["volume_pct"],
+            material_pct=kwargs["material_pct"],
+            be_rate=be_rate,
+            req_rate=req_rate,
+            delta_low=delta_low,
+            delta_high=delta_high,
+        )
+        driver_metrics_clean = _sanitize_metrics(driver_metrics)
+
+        daily_delta = driver_metrics_clean["daily_va_total"] - base_daily
+        if not np.isfinite(daily_delta):
+            daily_delta = float("nan")
+        annual_delta = float("nan")
+        if valid_working_days and np.isfinite(daily_delta):
+            annual_delta = daily_delta * float(working_days)
+
+        avg_va = _safe_series_mean(df_driver.get("va_per_min"))
+        avg_gap = _safe_series_mean(df_driver.get("rate_gap_vs_required"))
+        avg_req_price = _safe_series_mean(df_driver.get("required_selling_price"))
+
+        avg_va_delta = avg_va - base_avg_va if np.isfinite(avg_va) else float("nan")
+        avg_gap_delta = avg_gap - base_avg_gap if np.isfinite(avg_gap) else float("nan")
+        req_price_delta = (
+            avg_req_price - base_avg_req_price
+            if np.isfinite(avg_req_price)
+            else float("nan")
+        )
+
+        records.append(
+            {
+                "施策": label,
+                "変化率(%)": float(pct_value),
+                "日次付加価値差(円)": daily_delta,
+                "年間利益差(万円)": annual_delta / 10000.0
+                if np.isfinite(annual_delta)
+                else float("nan"),
+                "平均VA/分差(円)": avg_va_delta,
+                "必要賃率ギャップ差(円/分)": avg_gap_delta,
+                "必要販売単価差(円)": req_price_delta,
+            }
+        )
+
+        if key in {"price", "volume", "material"} and np.isfinite(daily_delta):
+            direction_daily = "増加" if daily_delta >= 0 else "減少"
+            daily_abs = abs(daily_delta)
+            annual_phrase = ""
+            if np.isfinite(annual_delta):
+                annual_abs = abs(annual_delta) / 10000.0
+                direction_annual = "増加" if annual_delta >= 0 else "減少"
+                annual_phrase = (
+                    f"、年間利益が{annual_abs:,.1f}万円{direction_annual}"
+                )
+            insights.append(
+                f"{label}を{int(pct_value):+d}%調整すると日次付加価値が{daily_abs:,.0f}円{direction_daily}{annual_phrase}します。"
+            )
+        elif key == "lead_time":
+            parts: List[str] = []
+            if np.isfinite(avg_va_delta):
+                direction = "増加" if avg_va_delta >= 0 else "減少"
+                parts.append(
+                    f"平均VA/分が{abs(avg_va_delta):.2f}円{direction}"
+                )
+            if np.isfinite(avg_gap_delta):
+                direction = "改善" if avg_gap_delta >= 0 else "悪化"
+                parts.append(
+                    f"必要賃率ギャップが{abs(avg_gap_delta):.2f}円/分{direction}"
+                )
+            if np.isfinite(req_price_delta):
+                direction = "低下" if req_price_delta < 0 else "上昇"
+                parts.append(
+                    f"必要販売単価が{abs(req_price_delta):,.0f}円{direction}"
+                )
+            if parts:
+                joined = "、".join(parts)
+                insights.append(
+                    f"{label}を{int(pct_value):+d}%調整すると{joined}します。"
+                )
+
+    if records:
+        df_summary = pd.DataFrame(records)
+    else:
+        df_summary = pd.DataFrame(
+            columns=[
+                "施策",
+                "変化率(%)",
+                "日次付加価値差(円)",
+                "年間利益差(万円)",
+                "平均VA/分差(円)",
+                "必要賃率ギャップ差(円/分)",
+                "必要販売単価差(円)",
+            ]
+        )
+
+    return df_summary, insights
 
 
 def _format_fermi_estimate(delta_daily_va: float, working_days: float, scenario_label: str) -> str:
@@ -752,6 +950,7 @@ scenario_name = st.session_state.get("current_scenario", "ベース")
 st.caption(f"適用中シナリオ: {scenario_name}")
 st.session_state.setdefault("quick_price", 0)
 st.session_state.setdefault("quick_ct", 0)
+st.session_state.setdefault("quick_volume", 0)
 st.session_state.setdefault("quick_material", 0)
 st.session_state.setdefault("active_simulation", "ベース")
 st.session_state.setdefault(
@@ -780,6 +979,7 @@ def reset_quick_params() -> None:
     """Reset quick simulation parameters to their default values."""
     st.session_state["quick_price"] = 0
     st.session_state["quick_ct"] = 0
+    st.session_state["quick_volume"] = 0
     st.session_state["quick_material"] = 0
     st.session_state["active_simulation"] = "ベース"
 
@@ -900,41 +1100,64 @@ for col, (label, preset) in zip(preset_cols, SIMULATION_PRESETS.items()):
         apply_simulation_preset(label)
         st.rerun()
 
-qcol1, qcol2, qcol3, qcol4 = st.columns([1, 1, 1, 0.8])
+qcol1, qcol2, qcol3, qcol4, qcol5 = st.columns([1.1, 1.1, 1.1, 1.1, 0.8])
 with qcol1:
-    st.radio(
+    st.slider(
         "販売価格",
-        options=[0, 3, 5, 10],
-        format_func=lambda x: f"+{x}%",
+        min_value=-10,
+        max_value=15,
+        value=int(st.session_state.get("quick_price", 0)),
+        step=1,
+        format="%d%%",
         key="quick_price",
-        horizontal=True,
+        help="製品価格を一律で増減させる簡易試算です。",
     )
 with qcol2:
-    st.radio(
-        "労働時間",
-        options=[0, -5, -10],
-        format_func=lambda x: f"{x}%",
+    st.slider(
+        "リードタイム (分/個)",
+        min_value=-30,
+        max_value=30,
+        value=int(st.session_state.get("quick_ct", 0)),
+        step=1,
+        format="%d%%",
         key="quick_ct",
-        horizontal=True,
+        help="製品1個当たりの所要時間（分/個）を短縮/延長した場合を想定します。",
     )
 with qcol3:
-    st.radio(
-        "材料費",
-        options=[0, -3, -5],
-        format_func=lambda x: f"{x}%",
-        key="quick_material",
-        horizontal=True,
+    st.slider(
+        "生産量 (日産数)",
+        min_value=-30,
+        max_value=30,
+        value=int(st.session_state.get("quick_volume", 0)),
+        step=1,
+        format="%d%%",
+        key="quick_volume",
+        help="日産数を一律で増減させたときの影響を試算します。",
     )
 with qcol4:
+    st.slider(
+        "材料費",
+        min_value=-10,
+        max_value=10,
+        value=int(st.session_state.get("quick_material", 0)),
+        step=1,
+        format="%d%%",
+        key="quick_material",
+        help="原材料コストを全SKUで同じ割合だけ増減させます。",
+    )
+with qcol5:
     st.button("リセット", on_click=reset_quick_params)
 
 qp = st.session_state["quick_price"]
 qc = st.session_state["quick_ct"]
+qv = st.session_state["quick_volume"]
 qm = st.session_state["quick_material"]
-active_label = _resolve_scenario_label(qp, qc, qm, scenario_store)
+active_label = _resolve_scenario_label(qp, qc, qm, qv, scenario_store)
 st.session_state["active_simulation"] = active_label
 preset_desc = SIMULATION_PRESETS.get(active_label, {}).get("description", "")
-summary_text = f"販売価格{qp:+d}%｜労働時間{qc:+d}%｜材料費{qm:+d}%"
+summary_text = (
+    f"販売価格{qp:+d}%｜リードタイム{qc:+d}%｜生産量{qv:+d}%｜材料費{qm:+d}%"
+)
 if active_label == "ベース":
     st.caption(f"シミュレーション: ベースライン（{summary_text}）")
 else:
@@ -966,6 +1189,7 @@ with st.expander("💾 シナリオ管理", expanded=False):
                 config = scenario_store.get(selected_saved, {})
                 st.session_state["quick_price"] = int(config.get("quick_price", 0))
                 st.session_state["quick_ct"] = int(config.get("quick_ct", 0))
+                st.session_state["quick_volume"] = int(config.get("quick_volume", 0))
                 st.session_state["quick_material"] = int(config.get("quick_material", 0))
                 st.session_state["scenario_manager_feedback"] = {
                     "type": "success",
@@ -1000,6 +1224,7 @@ with st.expander("💾 シナリオ管理", expanded=False):
             scenario_store[trimmed] = {
                 "quick_price": int(qp),
                 "quick_ct": int(qc),
+                "quick_volume": int(qv),
                 "quick_material": int(qm),
             }
             st.session_state["whatif_scenarios"] = scenario_store
@@ -1015,6 +1240,7 @@ df_base, base_metrics = _simulate_scenario(
     scenario_template,
     price_pct=0,
     ct_pct=0,
+    volume_pct=0,
     material_pct=0,
     be_rate=be_rate,
     req_rate=req_rate,
@@ -1030,6 +1256,7 @@ df_view, active_metrics = _simulate_scenario(
     scenario_template,
     price_pct=qp,
     ct_pct=qc,
+    volume_pct=qv,
     material_pct=qm,
     be_rate=be_rate,
     req_rate=req_rate,
@@ -1054,7 +1281,12 @@ scenario_results: Dict[str, Dict[str, Any]] = {
     "ベース": {
         "df": df_base,
         "metrics": base_metrics_clean,
-        "adjustments": {"quick_price": 0, "quick_ct": 0, "quick_material": 0},
+        "adjustments": {
+            "quick_price": 0,
+            "quick_ct": 0,
+            "quick_volume": 0,
+            "quick_material": 0,
+        },
     }
 }
 
@@ -1063,6 +1295,7 @@ for name, config in scenario_store.items():
         scenario_template,
         price_pct=config.get("quick_price", 0),
         ct_pct=config.get("quick_ct", 0),
+        volume_pct=config.get("quick_volume", 0),
         material_pct=config.get("quick_material", 0),
         be_rate=be_rate,
         req_rate=req_rate,
@@ -1075,6 +1308,7 @@ for name, config in scenario_store.items():
         "adjustments": {
             "quick_price": int(config.get("quick_price", 0)),
             "quick_ct": int(config.get("quick_ct", 0)),
+            "quick_volume": int(config.get("quick_volume", 0)),
             "quick_material": int(config.get("quick_material", 0)),
         },
     }
@@ -1083,7 +1317,12 @@ if active_label != "ベース":
     scenario_results[active_label] = {
         "df": df_view,
         "metrics": active_metrics_clean,
-        "adjustments": {"quick_price": int(qp), "quick_ct": int(qc), "quick_material": int(qm)},
+        "adjustments": {
+            "quick_price": int(qp),
+            "quick_ct": int(qc),
+            "quick_volume": int(qv),
+            "quick_material": int(qm),
+        },
     }
 
 option_candidates = ["ベース"] + list(scenario_store.keys())
@@ -1136,7 +1375,8 @@ for scen_name in selected_scenarios:
             "シナリオ": scen_name,
             "調整サマリ": _format_adjustment_summary(adjustments),
             "販売価格調整(%)": int(adjustments.get("quick_price", 0)),
-            "労働時間調整(%)": int(adjustments.get("quick_ct", 0)),
+            "リードタイム調整(%)": int(adjustments.get("quick_ct", 0)),
+            "生産量調整(%)": int(adjustments.get("quick_volume", 0)),
             "材料費調整(%)": int(adjustments.get("quick_material", 0)),
             "必要賃率達成率(%)": ach_val,
             "達成率差分(pts)": 0.0
@@ -1157,6 +1397,10 @@ if comparison_records:
     comparison_df = pd.DataFrame(comparison_records)
     styled = comparison_df.style.format(
         {
+            "販売価格調整(%)": "{:+d}",
+            "リードタイム調整(%)": "{:+d}",
+            "生産量調整(%)": "{:+d}",
+            "材料費調整(%)": "{:+d}",
             "必要賃率達成率(%)": "{:.1f}",
             "達成率差分(pts)": "{:+.1f}",
             "平均VA/分(円)": "{:.2f}",
@@ -1303,10 +1547,44 @@ mcol3.metric(
     delta=f"{daily_delta:+,.0f}円" if np.isfinite(daily_delta) else "N/A",
 )
 
-if active_label == "ベース" and not any([qp, qc, qm]):
+if active_label == "ベース" and not any([qp, qc, qv, qm]):
     st.caption("シミュレーション条件を変更すると年間インパクトの概算を表示します。")
 else:
     st.info(f"フェルミ推定: {_format_fermi_estimate(daily_delta, working_days, active_label)}")
+
+driver_df, driver_messages = _analyze_driver_impacts(
+    scenario_template,
+    df_base,
+    base_metrics_clean,
+    price_pct=qp,
+    ct_pct=qc,
+    volume_pct=qv,
+    material_pct=qm,
+    be_rate=be_rate,
+    req_rate=req_rate,
+    delta_low=delta_low,
+    delta_high=delta_high,
+    working_days=working_days,
+)
+
+if driver_messages or not driver_df.empty:
+    st.markdown("##### 🧮 感度分析サマリ")
+    for msg in driver_messages:
+        st.markdown(f"- {msg}")
+    if not driver_df.empty:
+        st.caption("各施策を単独で適用した場合の主要KPI差分です（他の変数はベース値を使用）。")
+        driver_styled = driver_df.style.format(
+            {
+                "変化率(%)": "{:+.0f}",
+                "日次付加価値差(円)": "{:+,.0f}",
+                "年間利益差(万円)": "{:+,.1f}",
+                "平均VA/分差(円)": "{:+.2f}",
+                "必要賃率ギャップ差(円/分)": "{:+.2f}",
+                "必要販売単価差(円)": "{:+,.0f}",
+            },
+            na_rep="-",
+        )
+        st.dataframe(driver_styled, use_container_width=True)
 
 trend_history = st.session_state.get("monthly_trend")
 if trend_history is None:
