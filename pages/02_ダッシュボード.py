@@ -636,9 +636,13 @@ def _generate_dashboard_comment(
     except Exception as exc:
         return f"AIコメント生成に失敗しました: {exc}"
 
-st.title("② ダッシュボード")
 render_sidebar_nav(page_key="dashboard")
-render_help_button("dashboard")
+
+header_col, help_col = st.columns([0.76, 0.24], gap="small")
+with header_col:
+    st.title("② ダッシュボード")
+
+render_help_button("dashboard", container=help_col)
 
 render_onboarding()
 render_page_tutorial("dashboard")
@@ -718,7 +722,7 @@ df = compute_results(df_products_raw, be_rate, req_rate, delta_low, delta_high)
 reclassified = int((df["rate_class"] != df_default["rate_class"]).sum())
 dcol2.metric("再分類SKU", reclassified)
 
-with st.expander("表示設定", expanded=False):
+with st.expander("ダッシュボードの表示調整", expanded=False):
     topn = int(
         st.slider("未達SKUの上位件数（テーブル/パレート）", min_value=5, max_value=50, value=20, step=1)
     )
