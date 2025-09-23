@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Dict, IO, Optional, Tuple, Union
+from typing import Any, Dict, IO, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -12,6 +12,7 @@ import pandas as pd
 SUPPORTED_ACCOUNTING_APPS: Dict[str, str] = {
     "弥生会計": "yayoi",
     "freee会計": "freee",
+    "MFクラウド会計": "mf_cloud",
 }
 SUPPORTED_POS_SYSTEMS: Dict[str, str] = {
     "スマレジPOS": "smaregi",
@@ -42,6 +43,15 @@ _COLUMN_ORDER = [
     "material_cost",
     "work_minutes",
 ]
+
+
+@dataclass
+class AutoSyncResult:
+    """Result bundle returned by :func:`auto_sync_transactions`."""
+
+    transactions: pd.DataFrame
+    summary: pd.DataFrame
+    logs: List[Dict[str, Any]]
 
 
 @dataclass
@@ -197,6 +207,98 @@ def summarize_transactions(transactions: pd.DataFrame) -> pd.DataFrame:
     grouped = grouped.drop(columns=["total_work_minutes"])
 
     return grouped[summary_columns].reset_index(drop=True)
+
+
+def auto_sync_transactions(
+    configs: Iterable[IntegrationConfig],
+    *,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+) -> AutoSyncResult:
+    """Fetch and aggregate transactions from multiple external systems.
+
+    Parameters
+    ----------
+    configs:
+        An iterable of :class:`IntegrationConfig` describing the systems to
+        poll.  Each configuration is processed independently so that
+        connection errors for one vendor do not abort the remaining syncs.
+    start_date, end_date:
+        Optional date range filters applied to every connector.  When omitted
+        the full sample range is used.
+
+    Returns
+    -------
+    AutoSyncResult
+        Dataclass containing the merged transaction records, their
+        SKU-level summary and a per-vendor status log.
+    """
+
+    config_list = list(configs)
+    if start_date and end_date and start_date > end_date:
+        raise ValueError("開始日は終了以前に設定してください。")
+
+    frames: List[pd.DataFrame] = []
+    logs: List[Dict[str, Any]] = []
+
+    for config in config_list:
+        try:
+            df = load_transactions_for_sync(
+                config, start_date=start_date, end_date=end_date
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            logs.append(
+                {
+                    "vendor": config.vendor,
+                    "source_type": config.source_type,
+                    "schedule": config.schedule,
+                    "status": "error",
+                    "error": str(exc),
+                    "records": 0,
+                }
+            )
+            continue
+
+        if df.empty:
+            logs.append(
+                {
+                    "vendor": config.vendor,
+                    "source_type": config.source_type,
+                    "schedule": config.schedule,
+                    "status": "empty",
+                    "records": 0,
+                }
+            )
+            continue
+
+        df = df.copy()
+        df["source_type"] = config.source_type
+        frames.append(df)
+
+        period_start, period_end = extract_transaction_period(df)
+        logs.append(
+            {
+                "vendor": config.vendor,
+                "source_type": config.source_type,
+                "schedule": config.schedule,
+                "status": "success",
+                "records": int(len(df)),
+                "period_start": period_start.isoformat() if period_start else None,
+                "period_end": period_end.isoformat() if period_end else None,
+            }
+        )
+
+    if frames:
+        transactions = (
+            pd.concat(frames, ignore_index=True)
+            .sort_values(["date", "product_no"])
+            .reset_index(drop=True)
+        )
+    else:
+        transactions = pd.DataFrame(columns=_COLUMN_ORDER + ["source", "source_type"])
+
+    summary = summarize_transactions(transactions)
+    return AutoSyncResult(transactions=transactions, summary=summary, logs=logs)
 
 
 def apply_transaction_summary_to_products(

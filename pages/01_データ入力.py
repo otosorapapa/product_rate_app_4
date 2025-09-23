@@ -10,6 +10,7 @@ from data_integrations import (
     IntegrationConfig,
     SUPPORTED_ACCOUNTING_APPS,
     SUPPORTED_POS_SYSTEMS,
+    auto_sync_transactions,
     apply_transaction_summary_to_products,
     extract_transaction_period,
     load_transactions_for_sync,
@@ -194,6 +195,7 @@ if "current_scenario" not in st.session_state:
 st.session_state.setdefault("external_sync_history", [])
 st.session_state.setdefault("external_sync_last_summary", [])
 st.session_state.setdefault("external_sync_last_transactions", None)
+st.session_state.setdefault("external_sync_last_run_logs", [])
 
 st.caption(f"適用中シナリオ: {st.session_state['current_scenario']}")
 
@@ -279,6 +281,13 @@ if isinstance(latest_transactions, pd.DataFrame) and not latest_transactions.emp
     with st.expander("直近の取り込み明細を表示", expanded=False):
         st.dataframe(latest_transactions, use_container_width=True)
 
+latest_run_logs = st.session_state.get("external_sync_last_run_logs") or []
+if latest_run_logs:
+    log_df = pd.DataFrame(latest_run_logs)
+    if not log_df.empty:
+        st.markdown("**取り込みシステム別ステータス**")
+        st.dataframe(log_df, use_container_width=True)
+
 tab_api, tab_csv = st.tabs(["API連携", "CSV自動取り込み"])
 
 with tab_api:
@@ -334,12 +343,15 @@ with tab_api:
             st.error(
                 "サンプルAPIレスポンスが見つかりません。CSV取り込みを使用してください。"
             )
+            st.session_state["external_sync_last_run_logs"] = []
         except ValueError as exc:
             st.error(str(exc))
+            st.session_state["external_sync_last_run_logs"] = []
         else:
             summary = summarize_transactions(transactions)
             if summary.empty:
                 st.warning("同期対象データが見つかりませんでした。期間を見直してください。")
+                st.session_state["external_sync_last_run_logs"] = []
             else:
                 updated_df = apply_transaction_summary_to_products(
                     df_products,
@@ -354,6 +366,21 @@ with tab_api:
                 st.session_state["external_sync_last_transactions"] = (
                     transactions.head(500).reset_index(drop=True)
                 )
+                st.session_state["external_sync_last_run_logs"] = [
+                    {
+                        "vendor": api_vendor,
+                        "source_type": api_source_type,
+                        "schedule": config.schedule,
+                        "status": "success",
+                        "records": int(len(transactions)),
+                        "period_start": api_start.isoformat()
+                        if isinstance(api_start, date)
+                        else None,
+                        "period_end": api_end.isoformat()
+                        if isinstance(api_end, date)
+                        else None,
+                    }
+                ]
                 period_start, period_end = extract_transaction_period(transactions)
                 st.session_state["external_sync_history"].append(
                     {
@@ -375,6 +402,120 @@ with tab_api:
                     "message": f"{api_vendor}から{int(summary['product_no'].nunique())}件のSKUを同期しました。",
                 }
                 st.rerun()
+
+    st.divider()
+    st.markdown("### 日次自動取得")
+    st.caption(
+        "対象システムをまとめて指定すると、選択期間の売上・原価データを一括取得します。"
+        " クラウド連携で手動入力を減らし、常に最新の実績で分析できます。"
+    )
+
+    auto_accounting_targets = st.multiselect(
+        "対象の会計ソフト",
+        options=list(SUPPORTED_ACCOUNTING_APPS.keys()),
+        default=list(SUPPORTED_ACCOUNTING_APPS.keys()),
+        key="auto_accounting_targets",
+    )
+    auto_pos_targets = st.multiselect(
+        "対象のPOSシステム",
+        options=list(SUPPORTED_POS_SYSTEMS.keys()),
+        default=list(SUPPORTED_POS_SYSTEMS.keys()),
+        key="auto_pos_targets",
+    )
+    auto_days = st.slider(
+        "取得期間（日数）",
+        min_value=1,
+        max_value=31,
+        value=7,
+        help="通常は直近7日間を取得します。必要に応じて日数を調整してください。",
+        key="auto_days",
+    )
+    if st.button("選択したシステムから自動取得", key="auto_sync_button"):
+        targets: list[IntegrationConfig] = []
+        for vendor in auto_accounting_targets:
+            targets.append(
+                IntegrationConfig(
+                    source_type="accounting",
+                    vendor=vendor,
+                    schedule="daily",
+                )
+            )
+        for vendor in auto_pos_targets:
+            targets.append(
+                IntegrationConfig(
+                    source_type="pos",
+                    vendor=vendor,
+                    schedule="daily",
+                )
+            )
+
+        if not targets:
+            st.warning("自動取得するシステムを選択してください。")
+        else:
+            auto_end = today
+            auto_start = today - timedelta(days=int(auto_days) - 1)
+            try:
+                result = auto_sync_transactions(
+                    targets, start_date=auto_start, end_date=auto_end
+                )
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                transactions = result.transactions
+                summary = result.summary
+                st.session_state["external_sync_last_run_logs"] = result.logs
+
+                if summary.empty or transactions.empty:
+                    st.warning(
+                        "選択した期間・システムに同期対象データが見つかりませんでした。"
+                    )
+                else:
+                    updated_df = apply_transaction_summary_to_products(
+                        df_products,
+                        summary,
+                        vendor="自動同期",
+                        synced_at=datetime.now(),
+                    )
+                    st.session_state["df_products_raw"] = updated_df
+                    st.session_state["external_sync_last_summary"] = summary.to_dict(
+                        "records"
+                    )
+                    st.session_state["external_sync_last_transactions"] = (
+                        transactions.head(500).reset_index(drop=True)
+                    )
+                    period_start, period_end = extract_transaction_period(transactions)
+                    joined_vendors = ", ".join(
+                        log["vendor"]
+                        for log in result.logs
+                        if log.get("status") == "success"
+                    ) or "対象なし"
+                    st.session_state["external_sync_history"].append(
+                        {
+                            "synced_at": datetime.now().isoformat(timespec="seconds"),
+                            "mode": "AUTO",
+                            "source_type": "自動連携",
+                            "vendor": joined_vendors,
+                            "records": int(len(transactions)),
+                            "updated_products": int(
+                                summary["product_no"].nunique()
+                            ),
+                            "period_start": period_start.isoformat()
+                            if period_start
+                            else None,
+                            "period_end": period_end.isoformat()
+                            if period_end
+                            else None,
+                            "frequency": "日次",
+                        }
+                    )
+                    st.session_state["external_sync_feedback"] = {
+                        "level": "success",
+                        "message": (
+                            f"{joined_vendors}から{int(summary['product_no'].nunique())}件のSKUを"
+                            "自動更新しました。"
+                        ),
+                    }
+                    st.rerun()
 
 with tab_csv:
     st.write(
@@ -411,10 +552,12 @@ with tab_csv:
                 transactions = load_transactions_for_sync(config, csv_file=csv_file)
             except ValueError as exc:
                 st.error(str(exc))
+                st.session_state["external_sync_last_run_logs"] = []
             else:
                 summary = summarize_transactions(transactions)
                 if summary.empty:
                     st.warning("CSVに同期対象データが含まれていませんでした。")
+                    st.session_state["external_sync_last_run_logs"] = []
                 else:
                     updated_df = apply_transaction_summary_to_products(
                         df_products,
@@ -429,6 +572,15 @@ with tab_csv:
                     st.session_state["external_sync_last_transactions"] = (
                         transactions.head(500).reset_index(drop=True)
                     )
+                    st.session_state["external_sync_last_run_logs"] = [
+                        {
+                            "vendor": csv_vendor,
+                            "source_type": csv_source_type,
+                            "schedule": config.schedule,
+                            "status": "success",
+                            "records": int(len(transactions)),
+                        }
+                    ]
                     period_start, period_end = extract_transaction_period(transactions)
                     st.session_state["external_sync_history"].append(
                         {
