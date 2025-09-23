@@ -338,54 +338,63 @@ TEMPLATE_FIELD_GUIDE: List[Dict[str, Any]] = [
         "Excel列名": "製品№",
         "説明": "製品コード。半角英数字やハイフンで記入します。",
         "単位/形式": "コード",
+        "必須": "必須",
         "サンプル値": "P-1001",
     },
     {
         "Excel列名": "製品名",
         "説明": "製品・SKUの正式名称。",
         "単位/形式": "テキスト",
+        "必須": "必須",
         "サンプル値": "苺大福",
     },
     {
         "Excel列名": "実際売単価",
         "説明": "1個あたりの実際販売価格（税抜）。",
         "単位/形式": "円/個",
+        "必須": "必須",
         "サンプル値": 320,
     },
     {
         "Excel列名": "原価（材料費）",
         "説明": "1個あたりの材料費。副資材も含める場合は合算してください。",
         "単位/形式": "円/個",
+        "必須": "必須",
         "サンプル値": 120,
     },
     {
         "Excel列名": "リードタイム",
         "説明": "1個を製造するのに必要な時間。分単位で入力します。",
         "単位/形式": "分/個",
+        "必須": "必須",
         "サンプル値": 4.5,
     },
     {
         "Excel列名": "日産製造数（個数）",
         "説明": "1日あたりの生産数量（能力値）。",
         "単位/形式": "個/日",
+        "必須": "必須",
         "サンプル値": 800,
     },
     {
         "Excel列名": "カテゴリー",
         "説明": "製品の分類（和菓子・洋菓子など）。",
         "単位/形式": "テキスト",
+        "必須": "推奨",
         "サンプル値": "和菓子",
     },
     {
         "Excel列名": "主要顧客",
         "説明": "主要な販売先やチャネル。",
         "単位/形式": "テキスト",
+        "必須": "推奨",
         "サンプル値": "量販店B社",
     },
     {
         "Excel列名": "備考",
         "説明": "任意入力欄。ライン名や補足情報などがあれば記入します。",
         "単位/形式": "任意",
+        "必須": "任意",
         "サンプル値": "既存ラインA",
     },
 ]
@@ -495,10 +504,12 @@ def validate_product_dataframe(
         )
     if missing_columns:
         return errors, warnings, pd.DataFrame(
-            columns=["レベル", "製品番号", "製品名", "項目", "内容", "入力値"]
+            columns=["レベル", "製品番号", "製品名", "項目", "内容", "入力値", "対処方法"]
         )
 
     def resolve_detail(detail: Any, row: pd.Series) -> Any:
+        if detail is None:
+            return ""
         if callable(detail):
             return detail(row)
         return detail
@@ -510,6 +521,7 @@ def validate_product_dataframe(
         message: str,
         detail: Any,
         value_column: Optional[str] = None,
+        action: Any = None,
     ) -> None:
         count = int(mask.sum())
         if count <= 0:
@@ -537,20 +549,45 @@ def validate_product_dataframe(
                     "項目": label,
                     "内容": resolve_detail(detail, row),
                     "入力値": raw_value,
+                    "対処方法": resolve_detail(action, row),
                 }
             )
+
+    missing_summary_hints = {
+        "product_no": "製品マスタ台帳を確認して一意の番号を入力してください。",
+        "product_name": "商品企画資料などから正式名称を入力してください。",
+        "actual_unit_price": "最新の販売価格表を確認して円単位で入力してください。",
+        "material_unit_cost": "原材料の見積や購買データを確認して円単位で入力してください。",
+        "minutes_per_unit": "製造現場に確認して1個あたりの製造時間（分）を入力してください。",
+        "daily_qty": "生産計画担当に確認して1日あたりの能力値を入力してください。",
+    }
+    missing_actions = {
+        "product_no": "製品番号台帳を確認し、重複しないコードを入力してください。",
+        "product_name": "商品仕様書に記載の正式な製品名を入力してください。",
+        "actual_unit_price": "価格表や販売管理システムで最新の単価（円/個）を確認して入力してください。",
+        "material_unit_cost": "購買担当またはBOMの原価を確認し、1個あたりの材料費を入力してください。",
+        "minutes_per_unit": "製造ライン担当者に確認して、1個を作るのに必要な分数を記録してください。",
+        "daily_qty": "生産管理担当に日産能力を確認し、1日あたりの数量で入力してください。",
+    }
 
     # Missing values
     for col, meta in column_info.items():
         mask = df[col].isna()
         if mask.any():
             level = meta.get("missing_level", "warning")
+            summary_hint = missing_summary_hints.get(
+                col, "テンプレートのサンプルを参考に入力してください。"
+            )
+            action_hint = missing_actions.get(
+                col, "担当部署に確認して数値を入力してください。"
+            )
             register_issue(
                 mask,
                 col,
                 level,
-                "{label}が未入力の製品が{count}件あります。テンプレートのサンプルを参考に入力してください。",
+                f"{{label}}が未入力の製品が{{count}}件あります。{summary_hint}",
                 "未入力",
+                action=action_hint,
             )
 
     # Invalid or suspicious values
@@ -558,16 +595,18 @@ def validate_product_dataframe(
         {
             "column": "minutes_per_unit",
             "level": "error",
-            "message": "リードタイム（分/個）が0以下の製品が{count}件あります。正しい値を入力してください。",
+            "message": "リードタイム（分/個）が0以下の製品が{count}件あります。製造現場に確認して実績時間を分単位で入力してください。",
             "detail": "リードタイムが0以下",
             "condition": lambda s: s <= 0,
+            "action": "製造ライン担当者に確認し、1個あたりの製造時間を分単位で入力してください。",
         },
         {
             "column": "actual_unit_price",
             "level": "error",
-            "message": "販売単価（円/個）が0以下の製品が{count}件あります。単価を見直してください。",
+            "message": "販売単価（円/個）が0以下の製品が{count}件あります。販売価格を確認し円単位で入力してください。",
             "detail": "販売単価が0以下",
             "condition": lambda s: s <= 0,
+            "action": "販売管理システムを確認し、税抜の販売単価（円/個）を入力してください。",
         },
         {
             "column": "material_unit_cost",
@@ -575,6 +614,7 @@ def validate_product_dataframe(
             "message": "材料費（円/個）が負の値の製品が{count}件あります。単位や入力値を確認してください。",
             "detail": "材料費が負の値",
             "condition": lambda s: s < 0,
+            "action": "購買データを確認し、円単位の原価を正の値で入力してください。",
         },
         {
             "column": "daily_qty",
@@ -582,6 +622,7 @@ def validate_product_dataframe(
             "message": "日産数（個/日）が0以下の製品が{count}件あります。生産能力を入力してください。",
             "detail": "日産数が0以下",
             "condition": lambda s: s <= 0,
+            "action": "生産管理担当に確認し、1日あたりに製造可能な数量を入力してください。",
         },
         {
             "column": "minutes_per_unit",
@@ -589,6 +630,55 @@ def validate_product_dataframe(
             "message": "リードタイム（分/個）が600分を超える製品が{count}件あります。時間の単位（分）を確認してください。",
             "detail": "リードタイムが600分超",
             "condition": lambda s: s > 600,
+            "action": "時間単位が時間(hrs)になっていないか確認し、分に換算してください。",
+        },
+        {
+            "column": "minutes_per_unit",
+            "level": "warning",
+            "message": "リードタイム（分/個）が0.1分未満の製品が{count}件あります。秒単位の値を分に換算しているか確認してください。",
+            "detail": "リードタイムが0.1分未満",
+            "condition": lambda s: (s > 0) & (s < 0.1),
+            "action": "秒で管理している場合は60で割り、分単位に換算した値を入力してください。",
+        },
+        {
+            "column": "actual_unit_price",
+            "level": "warning",
+            "message": "販売単価（円/個）が1円未満の製品が{count}件あります。単位が千円になっていないか確認してください。",
+            "detail": "販売単価が1円未満",
+            "condition": lambda s: (s > 0) & (s < 1),
+            "action": "テンプレートでは円/個で入力します。千円単位などの場合は円に換算してください。",
+        },
+        {
+            "column": "actual_unit_price",
+            "level": "warning",
+            "message": "販売単価（円/個）が100,000円以上の製品が{count}件あります。桁違いで入力していないか確認してください。",
+            "detail": "販売単価が高すぎる",
+            "condition": lambda s: s >= 100000,
+            "action": "単価が桁違いの場合は円単位に修正してください。高額品であればコメント欄に根拠を記載してください。",
+        },
+        {
+            "column": "material_unit_cost",
+            "level": "warning",
+            "message": "材料費（円/個）が1円未満の製品が{count}件あります。単位が千円になっていないか確認してください。",
+            "detail": "材料費が1円未満",
+            "condition": lambda s: (s > 0) & (s < 1),
+            "action": "テンプレートでは円/個で入力します。千円単位などの場合は円に換算してください。",
+        },
+        {
+            "column": "material_unit_cost",
+            "level": "warning",
+            "message": "材料費（円/個）が100,000円以上の製品が{count}件あります。桁違いで入力していないか確認してください。",
+            "detail": "材料費が高すぎる",
+            "condition": lambda s: s >= 100000,
+            "action": "材料費の桁を確認し、円単位に修正してください。高額原価の場合は備考に理由を記載してください。",
+        },
+        {
+            "column": "daily_qty",
+            "level": "warning",
+            "message": "日産数（個/日）が20,000個を超える製品が{count}件あります。月間数量を入力していないか確認してください。",
+            "detail": "日産数が20,000個超",
+            "condition": lambda s: s > 20000,
+            "action": "日産数は1日あたりの数量です。月間・年間の実績を入力している場合は日割りに換算してください。",
         },
     ]
 
@@ -596,8 +686,16 @@ def validate_product_dataframe(
         col = check["column"]
         if col not in df.columns:
             continue
-        mask = check["condition"](df[col].astype(float))
-        register_issue(mask, col, check["level"], check["message"], check["detail"])
+        series = pd.to_numeric(df[col], errors="coerce")
+        mask = check["condition"](series)
+        register_issue(
+            mask,
+            col,
+            check["level"],
+            check["message"],
+            check["detail"],
+            action=check.get("action"),
+        )
 
     # Material cost higher than selling price
     if {"actual_unit_price", "material_unit_cost"}.issubset(df.columns):
@@ -612,6 +710,7 @@ def validate_product_dataframe(
                 f"販売単価 {row.get('actual_unit_price')} < 材料費 {row.get('material_unit_cost')}"
             ),
             value_column="actual_unit_price",
+            action="価格改定や原価削減の対応要否を確認し、必要に応じて標準単価を見直してください。",
         )
 
     # Duplicate product numbers
@@ -623,11 +722,12 @@ def validate_product_dataframe(
             "error",
             "製品番号が重複している行が{count}件あります。各製品に一意の番号を設定してください。",
             "製品番号が重複",
+            action="重複している行の担当部署に確認し、ユニークな製品番号に修正してください。",
         )
 
     detail_df = pd.DataFrame(
         detail_rows,
-        columns=["レベル", "製品番号", "製品名", "項目", "内容", "入力値"],
+        columns=["レベル", "製品番号", "製品名", "項目", "内容", "入力値", "対処方法"],
     )
 
     return errors, warnings, detail_df
