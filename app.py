@@ -27,12 +27,17 @@ render_stepper(0)
 
 st.write("次のページから機能を選択してください。")
 
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 with c1:
     st.page_link("pages/01_データ入力.py", label="① データ入力 & 取り込み", icon="📥")
 with c2:
     st.page_link("pages/02_ダッシュボード.py", label="② ダッシュボード", icon="📊")
 with c3:
     st.page_link("pages/03_標準賃率計算.py", label="③ 標準賃率 計算/感度分析", icon="🧮")
+with c4:
+    st.page_link("pages/04_チャットサポート.py", label="④ チャット/FAQ", icon="💬")
 
-st.info("まずは『データ入力 & 取り込み』で Excel を読み込むか、サンプルを使用してください。")
+st.info(
+    "まずは『データ入力 & 取り込み』で Excel を読み込むかサンプルを使用し、"
+    "疑問があれば『チャット/FAQ』でAIに質問してください。"
+)
