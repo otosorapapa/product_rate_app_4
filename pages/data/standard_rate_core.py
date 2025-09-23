@@ -199,6 +199,72 @@ def build_reverse_index(nodes: Dict[str, Node]) -> Dict[str, list[str]]:
             reverse.setdefault(dep, []).append(node_key)
     return reverse
 
+
+def compute_profit_margin_share(results: Dict[str, float]) -> float:
+    """Return the share of the required rate allocated to profit and reserves."""
+
+    required_rate = float(results.get("required_rate", 0.0))
+    if required_rate <= 0:
+        return 0.0
+    break_even = float(results.get("break_even_rate", 0.0))
+    return (required_rate - break_even) / required_rate * 100.0
+
+
+def build_sensitivity_table(
+    params: Dict[str, float],
+    *,
+    percent_grid: Iterable[float] | None = None,
+) -> pd.DataFrame:
+    """Create a table of scenario results for labour cost and time variations."""
+
+    base_params, _ = sanitize_params(params)
+    grid = (
+        [float(p) for p in percent_grid]
+        if percent_grid is not None
+        else [float(x) for x in np.arange(-20, 25, 5)]
+    )
+    records: list[dict[str, float]] = []
+
+    for pct in grid:
+        factor = 1.0 + pct / 100.0
+        scenario = base_params.copy()
+        scenario["labor_cost"] = scenario["labor_cost"] * factor
+        _, res = compute_rates(scenario)
+        fixed_total = float(res.get("fixed_total", 0.0))
+        labor_share = (scenario["labor_cost"] / fixed_total * 100.0) if fixed_total else 0.0
+        records.append(
+            {
+                "factor": "labor_cost",
+                "change_pct": pct,
+                "required_rate": float(res.get("required_rate", 0.0)),
+                "break_even_rate": float(res.get("break_even_rate", 0.0)),
+                "profit_margin_pct": compute_profit_margin_share(res),
+                "labor_share_pct": labor_share,
+                "annual_minutes": float(res.get("annual_minutes", 0.0)),
+            }
+        )
+
+    for pct in grid:
+        factor = 1.0 + pct / 100.0
+        scenario = base_params.copy()
+        scenario["daily_hours"] = scenario["daily_hours"] * factor
+        _, res = compute_rates(scenario)
+        fixed_total = float(res.get("fixed_total", 0.0))
+        labor_share = (scenario["labor_cost"] / fixed_total * 100.0) if fixed_total else 0.0
+        records.append(
+            {
+                "factor": "daily_hours",
+                "change_pct": pct,
+                "required_rate": float(res.get("required_rate", 0.0)),
+                "break_even_rate": float(res.get("break_even_rate", 0.0)),
+                "profit_margin_pct": compute_profit_margin_share(res),
+                "labor_share_pct": labor_share,
+                "annual_minutes": float(res.get("annual_minutes", 0.0)),
+            }
+        )
+
+    return pd.DataFrame(records).sort_values(["factor", "change_pct"]).reset_index(drop=True)
+
 def sensitivity_series(params: Dict[str, float], key: str, grid):
     values: List[float] = []
     for val in grid:

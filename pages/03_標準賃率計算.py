@@ -8,6 +8,8 @@ if ROOT_DIR not in sys.path:
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from datetime import datetime
 from components import (
     apply_user_theme,
     render_help_button,
@@ -22,6 +24,10 @@ from textwrap import dedent
 from typing import Any, Optional
 from openai import OpenAI
 from offline import restore_session_state_from_cache, sync_offline_cache
+from legal_updates import (
+    build_compliance_alerts,
+    fetch_labor_standards_updates,
+)
 
 WIZARD_STEPS: list[tuple[str, str]] = [
     ("従業員情報", "従業員区分ごとの人数と稼働係数を入力します。"),
@@ -51,6 +57,274 @@ FORMULA_TIPS: tuple[str, ...] = (
     "賃率差異 ＝ 実際時間 × (標準賃率 − 実際賃率)",
     "効率差異 ＝ 標準賃率 × (標準時間 − 実際時間)",
 )
+
+LANGUAGE_CHOICES: dict[str, str] = {"日本語": "ja", "English": "en", "简体中文": "zh"}
+LANGUAGE_DEFAULT = "ja"
+
+TEXTS: dict[str, dict[str, str]] = {
+    "ja": {
+        "language_label": "表示言語 / Language",
+        "language_help": "外国人スタッフ向けに英語・中国語のガイドも表示できます。",
+        "legal_alert_header": "法改正アラート",
+        "legal_alert_caption": "最新の最低賃金や社会保険料率の改定を反映して標準賃率を確認しましょう。",
+        "legal_alert_no_data": "最新の法改正情報を取得できませんでした（サンプルデータを表示しています）。",
+        "legal_alert_min_wage_warning": "平均人件費時給 {current_hourly:,.1f} 円が{region}の最低賃金 {value:,.0f} 円を下回っています。{effective} 施行の改定に備えて賃率や人員計画の見直しが必要です。",
+        "legal_alert_min_wage_ok": "平均人件費時給 {current_hourly:,.1f} 円は{region}の最低賃金 {value:,.0f} 円を上回っています（施行日 {effective}）。",
+        "legal_alert_social_info": "{region} は {effective} から {value:.2f}{unit} に改定されます。",
+        "legal_alert_source_prefix": "情報源: {source}",
+        "legal_alert_api_note": "※ 将来的に厚生労働省等のAPIと連携し、改定情報を自動反映する計画です。",
+        "scenario_header": "シナリオ分析",
+        "scenario_caption": "賃率や労働時間を変化させたときの必要賃率・労務費率・利益配分のシミュレーションです。",
+        "scenario_tab_simulation": "シミュレーション",
+        "scenario_tab_chart": "感度チャート",
+        "wage_change_label": "平均賃率の変化率",
+        "wage_change_help": "基準値: +10%（労務費が10%上昇するシナリオ）",
+        "hours_change_label": "1日稼働時間の変化率",
+        "hours_change_help": "段取り改善や残業抑制による稼働時間の増減を想定します。",
+        "scenario_required_rate_metric": "必要賃率 (円/分)",
+        "scenario_labor_share_metric": "労務費率 (%)",
+        "scenario_profit_margin_metric": "利益確保比率 (%)",
+        "scenario_metric_caption": "基準との差分はΔ欄で表示されます。",
+        "scenario_table_col_label": "シナリオ",
+        "scenario_table_col_required_rate": "必要賃率 (円/分)",
+        "scenario_table_col_labor_share": "労務費率 (%)",
+        "scenario_table_col_profit_share": "利益確保比率 (%)",
+        "scenario_table_col_minutes": "年間標準稼働分 (分)",
+        "scenario_table_label_base": "基準シナリオ",
+        "scenario_table_label_sim": "調整後シナリオ",
+        "sensitivity_chart_caption": "主要パラメータを±20%変化させた場合の必要賃率と比率の推移です。赤点は+10%の状況を示します。",
+        "sensitivity_title_labor": "賃率変動と労務費率",
+        "sensitivity_title_hours": "稼働時間変動と利益配分",
+        "sensitivity_axis_change_pct": "変化率 (%)",
+        "sensitivity_axis_required_rate": "必要賃率 (円/分)",
+        "sensitivity_axis_labor_share": "労務費率 (%)",
+        "sensitivity_axis_profit_share": "利益確保比率 (%)",
+        "sensitivity_annotation_labor": "+10%で労務費率 {value:.1f}%",
+        "sensitivity_annotation_hours": "+10%で利益確保比率 {value:.1f}%",
+        "sensitivity_table_label_labor": "賃率+10%時",
+        "sensitivity_table_label_hours": "稼働時間+10%時",
+        "sensitivity_summary_caption": "10%増加時の主要指標。必要賃率への影響と比率の変化を確認できます。",
+        "education_header": "教育コンテンツ",
+        "education_caption": "標準原価計算や差異分析を学ぶための外部リソースです（外部サイトへ移動します）。",
+        "pdca_header": "PDCA改善ログ",
+        "pdca_caption": "施策アイデアや検証結果を記録し、PDCAサイクルを回しましょう。",
+        "pdca_stage_label": "ステージ",
+        "pdca_note_label": "メモ",
+        "pdca_save_button": "ログを追加",
+        "pdca_saved_message": "PDCAログを保存しました。",
+        "pdca_note_required": "メモを入力してください。",
+        "pdca_empty": "まだログがありません。新しいアクションを記録しましょう。",
+        "pdca_log_header": "最近の記録",
+        "pdca_column_stage": "ステージ",
+        "pdca_column_note": "内容",
+        "pdca_column_timestamp": "記録日時",
+    },
+    "en": {
+        "language_label": "Interface language",
+        "language_help": "Display supporting copy in English or Chinese for non-Japanese staff.",
+        "legal_alert_header": "Regulation alerts",
+        "legal_alert_caption": "Review minimum wage and social insurance updates before finalising the standard rate.",
+        "legal_alert_no_data": "No live regulatory data was retrieved; showing bundled sample updates instead.",
+        "legal_alert_min_wage_warning": "Estimated wage JPY {current_hourly:,.1f}/hour is below the {region} minimum of JPY {value:,.0f}. Adjust rates or staffing before {effective}.",
+        "legal_alert_min_wage_ok": "Estimated wage JPY {current_hourly:,.1f}/hour stays above the {region} minimum of JPY {value:,.0f} (effective {effective}).",
+        "legal_alert_social_info": "{region} rate changes to {value:.2f}{unit} from {effective}.",
+        "legal_alert_source_prefix": "Source: {source}",
+        "legal_alert_api_note": "Future releases will connect to open government APIs (e.g. MHLW) for automatic updates.",
+        "scenario_header": "Scenario analysis",
+        "scenario_caption": "Simulate how wage or working-hour changes impact the required rate, labour share and profit share.",
+        "scenario_tab_simulation": "Simulation",
+        "scenario_tab_chart": "Sensitivity chart",
+        "wage_change_label": "Average wage change",
+        "wage_change_help": "Default +10% represents a labour cost increase scenario.",
+        "hours_change_label": "Daily working time change",
+        "hours_change_help": "Model overtime controls or productivity programmes.",
+        "scenario_required_rate_metric": "Required rate (JPY/min)",
+        "scenario_labor_share_metric": "Labour share (%)",
+        "scenario_profit_margin_metric": "Profit share (%)",
+        "scenario_metric_caption": "Δ shows the gap versus the baseline assumptions.",
+        "scenario_table_col_label": "Scenario",
+        "scenario_table_col_required_rate": "Required rate (JPY/min)",
+        "scenario_table_col_labor_share": "Labour share (%)",
+        "scenario_table_col_profit_share": "Profit share (%)",
+        "scenario_table_col_minutes": "Annual standard minutes",
+        "scenario_table_label_base": "Baseline",
+        "scenario_table_label_sim": "Adjusted scenario",
+        "sensitivity_chart_caption": "Parameter sweep (±20%) for required rate and ratios. Red markers emphasise the +10% point.",
+        "sensitivity_title_labor": "Wage change vs labour share",
+        "sensitivity_title_hours": "Time change vs profit share",
+        "sensitivity_axis_change_pct": "Change (%)",
+        "sensitivity_axis_required_rate": "Required rate (JPY/min)",
+        "sensitivity_axis_labor_share": "Labour share (%)",
+        "sensitivity_axis_profit_share": "Profit share (%)",
+        "sensitivity_annotation_labor": "+10% ⇒ labour share {value:.1f}%",
+        "sensitivity_annotation_hours": "+10% ⇒ profit share {value:.1f}%",
+        "sensitivity_table_label_labor": "Wage +10%",
+        "sensitivity_table_label_hours": "Hours +10%",
+        "sensitivity_summary_caption": "Key metrics when inputs rise by 10%. Use it to brief management quickly.",
+        "education_header": "Learning resources",
+        "education_caption": "Curated videos and tutorials on standard costing and variance analysis (external links).",
+        "pdca_header": "PDCA improvement log",
+        "pdca_caption": "Record actions and findings to continuously improve the model.",
+        "pdca_stage_label": "Stage",
+        "pdca_note_label": "Notes",
+        "pdca_save_button": "Save entry",
+        "pdca_saved_message": "Entry added to the PDCA log.",
+        "pdca_note_required": "Please enter a note before saving.",
+        "pdca_empty": "No entries yet — capture your first improvement idea.",
+        "pdca_log_header": "Recent entries",
+        "pdca_column_stage": "Stage",
+        "pdca_column_note": "Details",
+        "pdca_column_timestamp": "Logged at",
+    },
+    "zh": {
+        "language_label": "界面语言 / Language",
+        "language_help": "可切换为英文或中文，方便外籍员工理解关键指标。",
+        "legal_alert_header": "法规更新提醒",
+        "legal_alert_caption": "请结合最新的最低工资与社会保险费率调整，检讨标准工资率。",
+        "legal_alert_no_data": "未能取得实时法规数据，现展示随附的样本资讯。",
+        "legal_alert_min_wage_warning": "估算的平均工资 {current_hourly:,.1f} 日元/小时低于 {region} 的最低工资 {value:,.0f} 日元。请在 {effective} 生效前调整工资或人员计划。",
+        "legal_alert_min_wage_ok": "估算的平均工资 {current_hourly:,.1f} 日元/小时高于 {region} 的最低工资 {value:,.0f} 日元（生效日 {effective}）。",
+        "legal_alert_social_info": "{region} 将自 {effective} 起调整为 {value:.2f}{unit}。",
+        "legal_alert_source_prefix": "信息来源：{source}",
+        "legal_alert_api_note": "未来版本将与厚生劳动省等公开API对接，实现自动更新。",
+        "scenario_header": "情景分析",
+        "scenario_caption": "模拟工资或工时变化对必要工资率、劳务成本比例及利润分配的影响。",
+        "scenario_tab_simulation": "模拟",
+        "scenario_tab_chart": "敏感度图",
+        "wage_change_label": "平均工资变动",
+        "wage_change_help": "默认 +10% 代表人工成本上升的情景。",
+        "hours_change_label": "每日工时变动",
+        "hours_change_help": "用于评估加班控制或效率提升的影响。",
+        "scenario_required_rate_metric": "必要工资率 (日元/分)",
+        "scenario_labor_share_metric": "劳务成本率 (%)",
+        "scenario_profit_margin_metric": "利润保留率 (%)",
+        "scenario_metric_caption": "Δ 显示与基准方案的差异。",
+        "scenario_table_col_label": "方案",
+        "scenario_table_col_required_rate": "必要工资率 (日元/分)",
+        "scenario_table_col_labor_share": "劳务成本率 (%)",
+        "scenario_table_col_profit_share": "利润保留率 (%)",
+        "scenario_table_col_minutes": "年度标准工时 (分)",
+        "scenario_table_label_base": "基准方案",
+        "scenario_table_label_sim": "调整后方案",
+        "sensitivity_chart_caption": "主要参数在 ±20% 变动时的走势，红点表示 +10% 情况。",
+        "sensitivity_title_labor": "工资变动与劳务成本率",
+        "sensitivity_title_hours": "工时变动与利润分配",
+        "sensitivity_axis_change_pct": "变动率 (%)",
+        "sensitivity_axis_required_rate": "必要工资率 (日元/分)",
+        "sensitivity_axis_labor_share": "劳务成本率 (%)",
+        "sensitivity_axis_profit_share": "利润保留率 (%)",
+        "sensitivity_annotation_labor": "+10% → 劳务成本率 {value:.1f}%",
+        "sensitivity_annotation_hours": "+10% → 利润保留率 {value:.1f}%",
+        "sensitivity_table_label_labor": "工资 +10%",
+        "sensitivity_table_label_hours": "工时 +10%",
+        "sensitivity_summary_caption": "关注输入增加 10% 时的关键指标，快速把握对经营的影响。",
+        "education_header": "学习资源",
+        "education_caption": "标准成本计算与差异分析的教学视频/文章（外部链接）。",
+        "pdca_header": "PDCA 改善记录",
+        "pdca_caption": "记录行动与复盘，持续推动改善循环。",
+        "pdca_stage_label": "阶段",
+        "pdca_note_label": "备注",
+        "pdca_save_button": "新增记录",
+        "pdca_saved_message": "已保存到 PDCA 记录。",
+        "pdca_note_required": "请先输入备注内容。",
+        "pdca_empty": "尚无记录，欢迎先登记第一条改善计划。",
+        "pdca_log_header": "最新记录",
+        "pdca_column_stage": "阶段",
+        "pdca_column_note": "内容",
+        "pdca_column_timestamp": "记录时间",
+    },
+}
+
+PDCA_STAGE_ORDER = ["plan", "do", "check", "act"]
+PDCA_STAGE_TRANSLATIONS = {
+    "plan": {"ja": "Plan（計画）", "en": "Plan", "zh": "计划"},
+    "do": {"ja": "Do（実行）", "en": "Do", "zh": "执行"},
+    "check": {"ja": "Check（評価）", "en": "Check", "zh": "检查"},
+    "act": {"ja": "Action（改善）", "en": "Act", "zh": "改善"},
+}
+
+EDUCATIONAL_RESOURCES = [
+    {
+        "url": "https://j-net21.smrj.go.jp/qa/expand/entry/qa137.html",
+        "translations": {
+            "ja": {
+                "title": "J-Net21: 標準原価計算の基礎",
+                "description": "中小機構がまとめた標準原価計算の概要と導入手順の解説記事。",
+            },
+            "en": {
+                "title": "J-Net21: Standard Costing Overview (Japanese)",
+                "description": "Outline produced by Japan's SME agency explaining the steps for standard costing (Japanese content).",
+            },
+            "zh": {
+                "title": "J-Net21：标准成本计算基础（日语）",
+                "description": "日本中小企业支援机构提供的标准成本计算入门文章。",
+            },
+        },
+    },
+    {
+        "url": "https://www.udemy.com/course/standard-costing-and-variance-analysis/",
+        "translations": {
+            "ja": {
+                "title": "Udemy: Standard Costing & Variance Analysis",
+                "description": "英語のオンデマンド講座で、差異分析の計算手順と活用方法を実務目線で学べます。",
+            },
+            "en": {
+                "title": "Udemy: Standard Costing & Variance Analysis",
+                "description": "Hands-on video lessons covering variance calculations and interpretation.",
+            },
+            "zh": {
+                "title": "Udemy：标准成本与差异分析",
+                "description": "英文线上课程，透过案例学习差异计算与解读。",
+            },
+        },
+    },
+    {
+        "url": "https://www.coursera.org/learn/managerial-accounting-fundamentals",
+        "translations": {
+            "ja": {
+                "title": "Coursera: Managerial Accounting Fundamentals",
+                "description": "英語の基礎講座。コスト管理やCVP分析の全体像を体系的に学習できます。",
+            },
+            "en": {
+                "title": "Coursera: Managerial Accounting Fundamentals",
+                "description": "Introductory course (English) covering managerial accounting, CVP and variance topics.",
+            },
+            "zh": {
+                "title": "Coursera：管理会计基础",
+                "description": "英文课程，系统学习管理会计、成本-数量-利润分析等主题。",
+            },
+        },
+    },
+]
+
+
+def _get_language_code() -> str:
+    return st.session_state.get("sr_language", LANGUAGE_DEFAULT)
+
+
+def _t(key: str, **kwargs: Any) -> str:
+    lang = _get_language_code()
+    translations = TEXTS.get(lang, TEXTS[LANGUAGE_DEFAULT])
+    template = translations.get(key) or TEXTS[LANGUAGE_DEFAULT].get(key, key)
+    return template.format(**kwargs) if kwargs else template
+
+
+def _stage_label(stage_key: str) -> str:
+    lang = _get_language_code()
+    options = PDCA_STAGE_TRANSLATIONS.get(stage_key, {})
+    return options.get(lang) or options.get(LANGUAGE_DEFAULT, stage_key)
+
+
+def _pdca_options() -> list[tuple[str, str]]:
+    return [(key, _stage_label(key)) for key in PDCA_STAGE_ORDER]
+
+
+def _resource_text(resource: dict[str, Any]) -> tuple[str, str]:
+    lang = _get_language_code()
+    payload = resource.get("translations", {}).get(lang)
+    if not payload:
+        payload = resource.get("translations", {}).get(LANGUAGE_DEFAULT, {})
+    return payload.get("title", ""), payload.get("description", "")
 
 
 def render_wizard_stepper(current_step: int) -> None:
@@ -536,6 +810,8 @@ from standard_rate_core import (
     build_reverse_index,
     plot_sensitivity,
     generate_pdf,
+    build_sensitivity_table,
+    compute_profit_margin_share,
 )
 
 apply_user_theme()
@@ -543,6 +819,26 @@ apply_user_theme()
 restore_session_state_from_cache()
 
 render_sidebar_nav(page_key="standard_rate")
+
+if "sr_language" not in st.session_state:
+    st.session_state["sr_language"] = LANGUAGE_DEFAULT
+
+language_keys = list(LANGUAGE_CHOICES.keys())
+current_lang_code = _get_language_code()
+current_name = next(
+    (name for name, code in LANGUAGE_CHOICES.items() if code == current_lang_code),
+    language_keys[0],
+)
+selected_name = st.sidebar.selectbox(
+    _t("language_label"),
+    language_keys,
+    index=language_keys.index(current_name),
+    help=_t("language_help"),
+)
+selected_code = LANGUAGE_CHOICES[selected_name]
+if selected_code != current_lang_code:
+    st.session_state["sr_language"] = selected_code
+    st.rerun()
 
 header_col, help_col = st.columns([0.76, 0.24], gap="small")
 with header_col:
@@ -1033,6 +1329,449 @@ if current_step >= 4:
         st.metric("正味直接工員数合計", f"{results['net_workers']:.2f}")
         st.caption("稼働係数を考慮した実働ベースの生産要員数です。")
 
+    base_fixed_total = results.get("fixed_total", 0.0)
+    base_labor_share = (
+        params["labor_cost"] / base_fixed_total * 100.0 if base_fixed_total else 0.0
+    )
+    base_profit_share = compute_profit_margin_share(results)
+
+    updates_df = fetch_labor_standards_updates()
+
+    st.subheader(_t("legal_alert_header"))
+    st.caption(_t("legal_alert_caption"))
+    if updates_df.empty:
+        st.info(_t("legal_alert_no_data"))
+    else:
+        alerts = build_compliance_alerts(
+            params,
+            results,
+            updates_df,
+            preferred_regions=["東京都", "全国加重平均"],
+        )
+        for alert in alerts:
+            effective_val = alert.get("effective_from")
+            effective_label = (
+                pd.to_datetime(effective_val, errors="coerce").strftime("%Y-%m-%d")
+                if effective_val
+                else "-"
+            )
+            if alert.get("category") == "最低賃金":
+                message_key = (
+                    "legal_alert_min_wage_warning"
+                    if alert.get("severity") == "warning"
+                    else "legal_alert_min_wage_ok"
+                )
+                message_fn = st.warning if alert.get("severity") == "warning" else st.info
+                message_fn(
+                    _t(
+                        message_key,
+                        current_hourly=alert.get("current_hourly_wage", 0.0),
+                        region=alert.get("region", ""),
+                        value=alert.get("value", 0.0),
+                        effective=effective_label,
+                    )
+                )
+            else:
+                st.info(
+                    _t(
+                        "legal_alert_social_info",
+                        region=alert.get("region", ""),
+                        value=alert.get("value", 0.0),
+                        unit=alert.get("unit", ""),
+                        effective=effective_label,
+                    )
+                )
+            source = alert.get("source") or ""
+            if source:
+                st.caption(_t("legal_alert_source_prefix", source=source))
+        display_df = updates_df.copy()
+        if "effective_from" in display_df.columns:
+            display_df["effective_from"] = pd.to_datetime(
+                display_df["effective_from"], errors="coerce"
+            ).dt.strftime("%Y-%m-%d")
+        if "last_updated" in display_df.columns:
+            display_df["last_updated"] = pd.to_datetime(
+                display_df["last_updated"], errors="coerce"
+            ).dt.strftime("%Y-%m-%d")
+        lang = _get_language_code()
+        if lang == "en":
+            column_map = {
+                "category": "Category",
+                "region": "Region",
+                "effective_from": "Effective from",
+                "value": "Value",
+                "unit": "Unit",
+                "source": "Source",
+                "last_updated": "Last updated",
+                "notes": "Notes",
+                "url": "URL",
+            }
+        elif lang == "zh":
+            column_map = {
+                "category": "类别",
+                "region": "地区",
+                "effective_from": "生效日",
+                "value": "数值",
+                "unit": "单位",
+                "source": "来源",
+                "last_updated": "更新日",
+                "notes": "备注",
+                "url": "链接",
+            }
+        else:
+            column_map = {
+                "category": "カテゴリ",
+                "region": "地域",
+                "effective_from": "施行日",
+                "value": "数値",
+                "unit": "単位",
+                "source": "情報源",
+                "last_updated": "更新日",
+                "notes": "備考",
+                "url": "URL",
+            }
+        display_df = display_df.rename(columns=column_map).fillna("")
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        st.caption(_t("legal_alert_api_note"))
+
+    st.subheader(_t("scenario_header"))
+    st.caption(_t("scenario_caption"))
+    sim_tab, chart_tab = st.tabs([
+        _t("scenario_tab_simulation"),
+        _t("scenario_tab_chart"),
+    ])
+
+    with sim_tab:
+        sim_cols = st.columns(2, gap="large")
+        wage_change = sim_cols[0].slider(
+            _t("wage_change_label"),
+            min_value=-0.2,
+            max_value=0.2,
+            value=0.1,
+            step=0.05,
+            format="%+0.0f%%",
+            help=_t("wage_change_help"),
+        )
+        hours_change = sim_cols[1].slider(
+            _t("hours_change_label"),
+            min_value=-0.2,
+            max_value=0.2,
+            value=0.0,
+            step=0.05,
+            format="%+0.0f%%",
+            help=_t("hours_change_help"),
+        )
+
+        adjusted_params = params.copy()
+        adjusted_params["labor_cost"] = adjusted_params["labor_cost"] * (1 + wage_change)
+        adjusted_params["daily_hours"] = adjusted_params["daily_hours"] * (1 + hours_change)
+        adjusted_params, _ = sanitize_params(adjusted_params)
+        _, adjusted_results = compute_rates(adjusted_params)
+
+        adjusted_required = adjusted_results["required_rate"]
+        adjusted_labor_share = (
+            adjusted_params["labor_cost"] / adjusted_results["fixed_total"] * 100.0
+            if adjusted_results["fixed_total"]
+            else 0.0
+        )
+        adjusted_profit_share = compute_profit_margin_share(adjusted_results)
+
+        sim_metrics = st.columns(3, gap="large")
+        sim_metrics[0].metric(
+            _t("scenario_required_rate_metric"),
+            f"{adjusted_required:.3f}",
+            delta=f"{adjusted_required - results['required_rate']:+.3f}",
+        )
+        sim_metrics[1].metric(
+            _t("scenario_labor_share_metric"),
+            f"{adjusted_labor_share:.1f}%",
+            delta=f"{adjusted_labor_share - base_labor_share:+.1f}pt",
+        )
+        sim_metrics[2].metric(
+            _t("scenario_profit_margin_metric"),
+            f"{adjusted_profit_share:.1f}%",
+            delta=f"{adjusted_profit_share - base_profit_share:+.1f}pt",
+        )
+        st.caption(_t("scenario_metric_caption"))
+
+        summary_df = pd.DataFrame(
+            [
+                {
+                    "scenario": _t("scenario_table_label_base"),
+                    "required_rate": results["required_rate"],
+                    "labor_share": base_labor_share,
+                    "profit_share": base_profit_share,
+                    "annual_minutes": results["annual_minutes"],
+                },
+                {
+                    "scenario": _t("scenario_table_label_sim"),
+                    "required_rate": adjusted_required,
+                    "labor_share": adjusted_labor_share,
+                    "profit_share": adjusted_profit_share,
+                    "annual_minutes": adjusted_results["annual_minutes"],
+                },
+            ]
+        )
+        summary_df = summary_df.rename(
+            columns={
+                "scenario": _t("scenario_table_col_label"),
+                "required_rate": _t("scenario_table_col_required_rate"),
+                "labor_share": _t("scenario_table_col_labor_share"),
+                "profit_share": _t("scenario_table_col_profit_share"),
+                "annual_minutes": _t("scenario_table_col_minutes"),
+            }
+        )
+        summary_style = summary_df.style.format(
+            {
+                _t("scenario_table_col_required_rate"): "{:.3f}",
+                _t("scenario_table_col_labor_share"): "{:.1f}%",
+                _t("scenario_table_col_profit_share"): "{:.1f}%",
+                _t("scenario_table_col_minutes"): "{:,.0f}",
+            }
+        )
+        st.dataframe(summary_style, use_container_width=True, hide_index=True)
+
+    with chart_tab:
+        st.caption(_t("sensitivity_chart_caption"))
+        sensitivity_df = build_sensitivity_table(params)
+        labor_df = sensitivity_df[sensitivity_df["factor"] == "labor_cost"]
+        hours_df = sensitivity_df[sensitivity_df["factor"] == "daily_hours"]
+
+        fig = make_subplots(
+            rows=1,
+            cols=2,
+            specs=[[{"secondary_y": True}, {"secondary_y": True}]],
+            subplot_titles=(
+                _t("sensitivity_title_labor"),
+                _t("sensitivity_title_hours"),
+            ),
+            horizontal_spacing=0.12,
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=labor_df["change_pct"],
+                y=labor_df["required_rate"],
+                name=_t("scenario_required_rate_metric"),
+                line=dict(color="#1f77b4"),
+            ),
+            row=1,
+            col=1,
+            secondary_y=False,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=labor_df["change_pct"],
+                y=labor_df["labor_share_pct"],
+                name=_t("scenario_labor_share_metric"),
+                line=dict(color="#ff7f0e", dash="dash"),
+            ),
+            row=1,
+            col=1,
+            secondary_y=True,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=hours_df["change_pct"],
+                y=hours_df["required_rate"],
+                name=_t("scenario_required_rate_metric"),
+                line=dict(color="#1f77b4"),
+                showlegend=False,
+            ),
+            row=1,
+            col=2,
+            secondary_y=False,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=hours_df["change_pct"],
+                y=hours_df["profit_margin_pct"],
+                name=_t("scenario_profit_margin_metric"),
+                line=dict(color="#2ca02c", dash="dash"),
+            ),
+            row=1,
+            col=2,
+            secondary_y=True,
+        )
+
+        highlight_labor = labor_df[labor_df["change_pct"] == 10.0]
+        if not highlight_labor.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=highlight_labor["change_pct"],
+                    y=highlight_labor["labor_share_pct"],
+                    mode="markers+text",
+                    text=[
+                        _t(
+                            "sensitivity_annotation_labor",
+                            value=float(highlight_labor["labor_share_pct"].iloc[0]),
+                        )
+                    ],
+                    textposition="top center",
+                    marker=dict(size=10, color="#d62728"),
+                    showlegend=False,
+                ),
+                row=1,
+                col=1,
+                secondary_y=True,
+            )
+        highlight_hours = hours_df[hours_df["change_pct"] == 10.0]
+        if not highlight_hours.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=highlight_hours["change_pct"],
+                    y=highlight_hours["profit_margin_pct"],
+                    mode="markers+text",
+                    text=[
+                        _t(
+                            "sensitivity_annotation_hours",
+                            value=float(highlight_hours["profit_margin_pct"].iloc[0]),
+                        )
+                    ],
+                    textposition="bottom center",
+                    marker=dict(size=10, color="#d62728"),
+                    showlegend=False,
+                ),
+                row=1,
+                col=2,
+                secondary_y=True,
+            )
+
+        fig.update_xaxes(title_text=_t("sensitivity_axis_change_pct"), row=1, col=1)
+        fig.update_xaxes(title_text=_t("sensitivity_axis_change_pct"), row=1, col=2)
+        fig.update_yaxes(
+            title_text=_t("sensitivity_axis_required_rate"),
+            row=1,
+            col=1,
+            secondary_y=False,
+        )
+        fig.update_yaxes(
+            title_text=_t("sensitivity_axis_labor_share"),
+            row=1,
+            col=1,
+            secondary_y=True,
+        )
+        fig.update_yaxes(
+            title_text=_t("sensitivity_axis_required_rate"),
+            row=1,
+            col=2,
+            secondary_y=False,
+        )
+        fig.update_yaxes(
+            title_text=_t("sensitivity_axis_profit_share"),
+            row=1,
+            col=2,
+            secondary_y=True,
+        )
+        fig.add_vline(x=10, line_dash="dot", line_color="#d62728", row=1, col=1)
+        fig.add_vline(x=10, line_dash="dot", line_color="#d62728", row=1, col=2)
+        fig.update_layout(
+            height=420,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        highlight_rows: list[dict[str, float]] = []
+        if not highlight_labor.empty:
+            highlight_rows.append(
+                {
+                    "scenario": _t("sensitivity_table_label_labor"),
+                    "required_rate": float(highlight_labor["required_rate"].iloc[0]),
+                    "labor_share": float(highlight_labor["labor_share_pct"].iloc[0]),
+                    "profit_share": float(highlight_labor["profit_margin_pct"].iloc[0]),
+                    "annual_minutes": float(highlight_labor["annual_minutes"].iloc[0]),
+                }
+            )
+        if not highlight_hours.empty:
+            highlight_rows.append(
+                {
+                    "scenario": _t("sensitivity_table_label_hours"),
+                    "required_rate": float(highlight_hours["required_rate"].iloc[0]),
+                    "labor_share": float(highlight_hours["labor_share_pct"].iloc[0]),
+                    "profit_share": float(highlight_hours["profit_margin_pct"].iloc[0]),
+                    "annual_minutes": float(highlight_hours["annual_minutes"].iloc[0]),
+                }
+            )
+        if highlight_rows:
+            highlight_df = pd.DataFrame(highlight_rows).rename(
+                columns={
+                    "scenario": _t("scenario_table_col_label"),
+                    "required_rate": _t("scenario_table_col_required_rate"),
+                    "labor_share": _t("scenario_table_col_labor_share"),
+                    "profit_share": _t("scenario_table_col_profit_share"),
+                    "annual_minutes": _t("scenario_table_col_minutes"),
+                }
+            )
+            highlight_style = highlight_df.style.format(
+                {
+                    _t("scenario_table_col_required_rate"): "{:.3f}",
+                    _t("scenario_table_col_labor_share"): "{:.1f}%",
+                    _t("scenario_table_col_profit_share"): "{:.1f}%",
+                    _t("scenario_table_col_minutes"): "{:,.0f}",
+                }
+            )
+            st.dataframe(highlight_style, use_container_width=True, hide_index=True)
+            st.caption(_t("sensitivity_summary_caption"))
+
+    st.subheader(_t("education_header"))
+    st.caption(_t("education_caption"))
+    for resource in EDUCATIONAL_RESOURCES:
+        title, description = _resource_text(resource)
+        if not title:
+            continue
+        if description:
+            st.markdown(f"- [{title}]({resource['url']}) — {description}")
+        else:
+            st.markdown(f"- [{title}]({resource['url']})")
+
+    st.subheader(_t("pdca_header"))
+    st.caption(_t("pdca_caption"))
+    pdca_log: list[dict[str, Any]] = st.session_state.setdefault("pdca_log", [])
+    with st.form("pdca_log_form", clear_on_submit=True):
+        options = _pdca_options()
+        option_labels = [label for _, label in options]
+        selected_stage_label = st.selectbox(
+            _t("pdca_stage_label"),
+            option_labels,
+            index=0,
+        )
+        selected_stage_key = next(
+            key for key, label in options if label == selected_stage_label
+        )
+        note_text = st.text_area(_t("pdca_note_label"), height=100)
+        submitted = st.form_submit_button(_t("pdca_save_button"))
+    if submitted:
+        if note_text.strip():
+            pdca_log.append(
+                {
+                    "stage": selected_stage_key,
+                    "note": note_text.strip(),
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
+            st.session_state["pdca_log"] = pdca_log
+            st.success(_t("pdca_saved_message"))
+        else:
+            st.warning(_t("pdca_note_required"))
+
+    if pdca_log:
+        st.markdown(f"**{_t('pdca_log_header')}**")
+        log_df = pd.DataFrame(pdca_log)
+        log_df["stage"] = log_df["stage"].apply(_stage_label)
+        log_df["timestamp"] = pd.to_datetime(
+            log_df["timestamp"], errors="coerce"
+        ).dt.strftime("%Y-%m-%d %H:%M")
+        log_df = log_df.rename(
+            columns={
+                "stage": _t("pdca_column_stage"),
+                "note": _t("pdca_column_note"),
+                "timestamp": _t("pdca_column_timestamp"),
+            }
+        )
+        st.dataframe(log_df, use_container_width=True, hide_index=True)
+    else:
+        st.info(_t("pdca_empty"))
+
     st.markdown("#### 差異分析（標準 vs 実績）")
     variance_state = st.session_state.setdefault("sr_variance_inputs", {})
     default_actual_minutes = variance_state.get("actual_minutes", results["annual_minutes"])
@@ -1266,10 +2005,11 @@ if current_step >= 4:
     )
     st.dataframe(df_break, use_container_width=True)
 
-    st.subheader("感度分析")
-    st.caption("主要な入力を増減させたときに賃率がどのように変わるかを可視化します。")
-    fig = plot_sensitivity(params)
-    st.pyplot(fig)
+    st.subheader("感度分析（PDFエクスポート用）")
+    static_fig = plot_sensitivity(params)
+    with st.expander("固定グラフを表示", expanded=False):
+        st.caption("PDF出力に含まれる感度分析の固定図です。")
+        st.pyplot(static_fig)
 
     df_csv = pd.DataFrame(list(nodes.values()))
     df_csv["depends_on"] = df_csv["depends_on"].apply(lambda x: ",".join(x))
@@ -1281,7 +2021,7 @@ if current_step >= 4:
         mime="text/csv",
     )
 
-    pdf_bytes = generate_pdf(nodes, fig)
+    pdf_bytes = generate_pdf(nodes, static_fig)
     st.download_button(
         "PDFエクスポート",
         data=pdf_bytes,

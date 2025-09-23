@@ -1,0 +1,46 @@
+[
+  {
+    "category": "最低賃金",
+    "region": "全国加重平均",
+    "effective_from": "2024-10-01",
+    "value": 1023,
+    "unit": "円/時",
+    "source": "厚生労働省",
+    "url": "https://www.mhlw.go.jp/stf/newpage_41425.html",
+    "last_updated": "2024-10-25",
+    "notes": "2024年度地域別最低賃金改定の全国加重平均です。"
+  },
+  {
+    "category": "最低賃金",
+    "region": "東京都",
+    "effective_from": "2024-10-01",
+    "value": 1113,
+    "unit": "円/時",
+    "source": "東京都産業労働局",
+    "url": "https://www.bousai.metro.tokyo.lg.jp/rousa/sokuhou/",
+    "last_updated": "2024-10-25",
+    "notes": "東京都の地域別最低賃金額。"
+  },
+  {
+    "category": "社会保険料率",
+    "region": "協会けんぽ（東京） 健康保険料率",
+    "effective_from": "2024-03-01",
+    "value": 9.98,
+    "unit": "％",
+    "source": "協会けんぽ",
+    "url": "https://www.kyoukaikenpo.or.jp/g3/cat310/sb3040/r6/20240301/",
+    "last_updated": "2024-03-05",
+    "notes": "一般保険料率（介護保険第2号被保険者を含む）。"
+  },
+  {
+    "category": "社会保険料率",
+    "region": "厚生年金保険料率",
+    "effective_from": "2024-09-01",
+    "value": 18.30,
+    "unit": "％",
+    "source": "日本年金機構",
+    "url": "https://www.nenkin.go.jp/service/kounen/hokenryo/",
+    "last_updated": "2024-08-20",
+    "notes": "標準報酬月額に対する労使折半前の料率。"
+  }
+]
