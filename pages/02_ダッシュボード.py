@@ -237,6 +237,33 @@ def _format_number(value: Any) -> str:
     return f"{val:,.2f}"
 
 
+def _format_currency(value: Any, unit: str = "円", decimals: int = 0) -> str:
+    """Format numeric values as currency text with thousands separators."""
+
+    if value is None or pd.isna(value):
+        return "N/A"
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    fmt = f"{{:,.{decimals}f}}" if decimals > 0 else "{:,}"  # type: ignore[str-format]
+    return f"{fmt.format(val)}{unit}"
+
+
+def _format_roi(value: Any) -> str:
+    """Format ROI months with guard for non-finite numbers."""
+
+    if value is None or pd.isna(value):
+        return "N/A"
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    if not np.isfinite(val):
+        return "∞"
+    return f"{val:.1f}"
+
+
 def _format_delta(value: float, suffix: str) -> str:
     """Format change metrics with sign and suffix, handling NaN gracefully."""
 
@@ -416,12 +443,17 @@ def _generate_dashboard_comment(
 
     top_gap_lines = []
     for row in top_gaps:
-        roi = row.get("roi_months")
-        roi_txt = "N/A" if roi is None or pd.isna(roi) else f"{float(roi):.1f}"
+        roi_txt = _format_roi(row.get("roi_months"))
         gap_val = row.get("gap")
-        gap_txt = "N/A" if gap_val is None or pd.isna(gap_val) else f"{float(gap_val):.2f}"
+        gap_txt = "N/A" if gap_val is None or pd.isna(gap_val) else f"{float(gap_val):.2f}円/分"
+        action_label = row.get("best_action_label")
+        if action_label and action_label != "推奨なし":
+            action_txt = f", 推奨 {action_label}"
+        else:
+            action_txt = ""
+        benefit_txt = _format_currency(row.get("best_monthly_benefit"))
         top_gap_lines.append(
-            f"- {row.get('product_name','不明')} (ギャップ {gap_txt}, ROI {roi_txt}ヶ月)"
+            f"- {row.get('product_name','不明')} (ギャップ {gap_txt}, ROI {roi_txt}ヶ月{action_txt}, 月次効果 {benefit_txt})"
         )
     top_gap_text = "\n".join(top_gap_lines) or "- 該当なし"
 
@@ -926,17 +958,230 @@ else:
     anomaly_summary_stats = pd.DataFrame(columns=["metric", "count", "severity_mean"])
 
 gap_df = df_view.copy()
+gap_df["va_per_min"] = pd.to_numeric(gap_df.get("va_per_min"), errors="coerce")
 gap_df["gap"] = req_rate - gap_df["va_per_min"]
-gap_df = gap_df[gap_df["gap"] > 0]
-gap_df["price_improve"] = (gap_df["required_selling_price"] - gap_df["actual_unit_price"]).clip(lower=0)
-gap_df["ct_improve"] = (gap_df["minutes_per_unit"] - (gap_df["gp_per_unit"] / req_rate)).clip(lower=0)
+gap_df = gap_df[gap_df["gap"] > 0].copy()
+
+empty_series = pd.Series(np.nan, index=gap_df.index, dtype="float64")
+actual_price = pd.to_numeric(gap_df.get("actual_unit_price", empty_series), errors="coerce")
+material_cost = pd.to_numeric(gap_df.get("material_unit_cost", empty_series), errors="coerce")
+minutes_per_unit = pd.to_numeric(gap_df.get("minutes_per_unit", empty_series), errors="coerce")
+daily_qty = pd.to_numeric(gap_df.get("daily_qty", empty_series), errors="coerce")
+required_price = pd.to_numeric(gap_df.get("required_selling_price", empty_series), errors="coerce")
+gp_per_unit = pd.to_numeric(gap_df.get("gp_per_unit", empty_series), errors="coerce")
+
+gap_df["price_improve"] = (required_price - actual_price).clip(lower=0)
+if req_rate:
+    target_minutes = gp_per_unit / req_rate
+else:
+    target_minutes = pd.Series(np.nan, index=gap_df.index, dtype="float64")
+gap_df["ct_improve"] = (minutes_per_unit - target_minutes).clip(lower=0)
 gap_df["material_improve"] = (
-    gap_df["material_unit_cost"]
-    - (gap_df["actual_unit_price"] - req_rate * gap_df["minutes_per_unit"])
+    material_cost - (actual_price - req_rate * minutes_per_unit)
 ).clip(lower=0)
-gap_df["roi_months"] = gap_df["price_improve"].replace({0: np.nan}) / gap_df["gap"].replace({0: np.nan})
-top_list = gap_df.sort_values("gap", ascending=False).head(20)
+
+gap_df["price_improve"] = gap_df["price_improve"].fillna(0.0)
+gap_df["ct_improve"] = gap_df["ct_improve"].fillna(0.0)
+gap_df["material_improve"] = gap_df["material_improve"].fillna(0.0)
+
+annual_days = float(base_params.get("working_days", DEFAULT_PARAMS["working_days"]))
+default_monthly_days = max(1.0, round(annual_days / 12.0, 1))
+priority_state = st.session_state.setdefault("priority_controls", {})
+priority_state.setdefault("working_days_per_month", default_monthly_days)
+priority_state.setdefault("price_cost", 200000.0)
+priority_state.setdefault("ct_cost", 600000.0)
+priority_state.setdefault("material_cost", 400000.0)
+priority_state.setdefault("roi_limit", 3.0)
+priority_state.setdefault("apply_roi_filter", False)
+priority_state.setdefault(
+    "action_filter",
+    ["価格改善", "リードタイム改善", "材料改善"],
+)
+
+action_labels = {
+    "price": "価格改善",
+    "ct": "リードタイム改善",
+    "material": "材料改善",
+    "none": "推奨なし",
+}
+action_primary = [action_labels["price"], action_labels["ct"], action_labels["material"]]
+action_all_options = action_primary + [action_labels["none"]]
+
+with st.expander("優先順位付けロジック & フィルター設定", expanded=False):
+    st.markdown(
+        """
+        **算出方法**
+        - ギャップ（月次不足額）= (必要賃率 − 現状VA/分) × 分/個 × 日産数 × 稼働日数
+        - 価格/材料改善の月次効果 = 単価差額 × 日産数 × 稼働日数
+        - リードタイム改善の月次効果 = 改善分(分/個) × 日産数 × 稼働日数 × 必要賃率
+        - 優先度スコア = 月次効果 ÷ 想定投資額（= 1か月あたりのROI）
+        - 想定ROI(月) = 想定投資額 ÷ 月次効果
+        """
+    )
+    conf_left, conf_right = st.columns(2)
+    with conf_left:
+        priority_state["working_days_per_month"] = st.number_input(
+            "月あたり稼働日数",
+            min_value=1.0,
+            max_value=31.0,
+            value=float(priority_state["working_days_per_month"]),
+            step=1.0,
+        )
+        priority_state["price_cost"] = st.number_input(
+            "価格改善の想定投資額 (円)",
+            min_value=1.0,
+            value=float(priority_state["price_cost"]),
+            step=50000.0,
+        )
+        priority_state["ct_cost"] = st.number_input(
+            "リードタイム改善の想定投資額 (円)",
+            min_value=1.0,
+            value=float(priority_state["ct_cost"]),
+            step=50000.0,
+        )
+        priority_state["material_cost"] = st.number_input(
+            "材料改善の想定投資額 (円)",
+            min_value=1.0,
+            value=float(priority_state["material_cost"]),
+            step=50000.0,
+        )
+    with conf_right:
+        priority_state["roi_limit"] = st.number_input(
+            "ROI上限 (月)",
+            min_value=0.5,
+            value=float(priority_state["roi_limit"]),
+            step=0.5,
+            format="%.1f",
+        )
+        priority_state["apply_roi_filter"] = st.checkbox(
+            "ROI上限で絞り込む",
+            value=bool(priority_state["apply_roi_filter"]),
+        )
+        default_actions = [
+            opt
+            for opt in priority_state.get("action_filter", action_primary)
+            if opt in action_all_options
+        ]
+        if not default_actions:
+            default_actions = action_primary
+        priority_state["action_filter"] = st.multiselect(
+            "表示する施策タイプ",
+            options=action_all_options,
+            default=default_actions,
+        )
+    st.caption(
+        "投資額はSKUごとの月次効果に一律で適用します。ROI = 想定投資額 ÷ 月次効果。"
+    )
+
+working_days_per_month = float(priority_state.get("working_days_per_month", default_monthly_days))
+price_cost = float(priority_state.get("price_cost", 1.0))
+ct_cost = float(priority_state.get("ct_cost", 1.0))
+material_cost = float(priority_state.get("material_cost", 1.0))
+roi_limit = float(priority_state.get("roi_limit", 3.0))
+raw_selected_actions = priority_state.get("action_filter", action_primary)
+if not raw_selected_actions:
+    selected_actions = action_all_options
+else:
+    selected_actions = [
+        opt for opt in raw_selected_actions if opt in action_all_options
+    ]
+    if not selected_actions:
+        selected_actions = action_all_options
+
+gap_vals = pd.to_numeric(gap_df["gap"], errors="coerce").fillna(0.0)
+minutes_vals = minutes_per_unit.fillna(0.0)
+qty_vals = daily_qty.fillna(0.0)
+price_vals = pd.to_numeric(gap_df["price_improve"], errors="coerce").fillna(0.0)
+ct_vals = pd.to_numeric(gap_df["ct_improve"], errors="coerce").fillna(0.0)
+material_vals = pd.to_numeric(gap_df["material_improve"], errors="coerce").fillna(0.0)
+
+gap_df["monthly_shortfall_value"] = gap_vals * minutes_vals * qty_vals * working_days_per_month
+gap_df["price_monthly_benefit"] = price_vals * qty_vals * working_days_per_month
+gap_df["ct_monthly_benefit"] = ct_vals * req_rate * qty_vals * working_days_per_month
+gap_df["material_monthly_benefit"] = material_vals * qty_vals * working_days_per_month
+
+price_benefit = pd.to_numeric(gap_df["price_monthly_benefit"], errors="coerce")
+ct_benefit = pd.to_numeric(gap_df["ct_monthly_benefit"], errors="coerce")
+material_benefit = pd.to_numeric(gap_df["material_monthly_benefit"], errors="coerce")
+
+gap_df["price_roi_months"] = np.where(price_benefit > 0, price_cost / price_benefit, np.nan)
+gap_df["ct_roi_months"] = np.where(ct_benefit > 0, ct_cost / ct_benefit, np.nan)
+gap_df["material_roi_months"] = np.where(
+    material_benefit > 0, material_cost / material_benefit, np.nan
+)
+
+gap_df["price_score"] = np.where(price_benefit > 0, price_benefit / price_cost, 0.0)
+gap_df["ct_score"] = np.where(ct_benefit > 0, ct_benefit / ct_cost, 0.0)
+gap_df["material_score"] = np.where(
+    material_benefit > 0, material_benefit / material_cost, 0.0
+)
+
+action_map = {
+    "price": {
+        "label": action_labels["price"],
+        "score_col": "price_score",
+        "roi_col": "price_roi_months",
+        "benefit_col": "price_monthly_benefit",
+        "cost": price_cost,
+    },
+    "ct": {
+        "label": action_labels["ct"],
+        "score_col": "ct_score",
+        "roi_col": "ct_roi_months",
+        "benefit_col": "ct_monthly_benefit",
+        "cost": ct_cost,
+    },
+    "material": {
+        "label": action_labels["material"],
+        "score_col": "material_score",
+        "roi_col": "material_roi_months",
+        "benefit_col": "material_monthly_benefit",
+        "cost": material_cost,
+    },
+}
+
+score_cols = [meta["score_col"] for meta in action_map.values()]
+score_df = gap_df[score_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+best_idx = score_df.idxmax(axis=1)
+best_scores = score_df.max(axis=1)
+gap_df["best_score"] = best_scores
+gap_df["best_action_key"] = np.where(
+    best_scores > 0, best_idx.str.replace("_score", "", regex=False), "none"
+)
+gap_df["best_action_label"] = gap_df["best_action_key"].map(
+    {key: meta["label"] for key, meta in action_map.items()}
+).fillna(action_labels["none"])
+gap_df.loc[gap_df["best_action_key"] == "none", "best_action_label"] = action_labels["none"]
+
+gap_df["best_roi_months"] = np.nan
+gap_df["best_monthly_benefit"] = 0.0
+gap_df["best_investment"] = np.nan
+for key, meta in action_map.items():
+    mask = gap_df["best_action_key"] == key
+    gap_df.loc[mask, "best_roi_months"] = gap_df.loc[mask, meta["roi_col"]]
+    gap_df.loc[mask, "best_monthly_benefit"] = gap_df.loc[mask, meta["benefit_col"]]
+    gap_df.loc[mask, "best_investment"] = meta["cost"]
+gap_df["best_roi_months"] = gap_df["best_roi_months"].replace([np.inf, -np.inf], np.nan)
+gap_df["roi_months"] = gap_df["best_roi_months"]
+
+filtered_gap_df = gap_df.copy()
+if selected_actions:
+    filtered_gap_df = filtered_gap_df[filtered_gap_df["best_action_label"].isin(selected_actions)]
+if priority_state.get("apply_roi_filter", False):
+    filtered_gap_df = filtered_gap_df[
+        filtered_gap_df["best_roi_months"].notna() & (filtered_gap_df["best_roi_months"] <= roi_limit)
+    ]
+
+top_list = filtered_gap_df.sort_values(
+    ["best_score", "best_monthly_benefit", "gap"], ascending=[False, False, False]
+).head(20)
 top_cards = top_list.head(5)
+
+filter_summaries: List[str] = []
+if priority_state.get("apply_roi_filter", False):
+    filter_summaries.append(f"ROI≦{roi_limit:.1f}ヶ月")
+if set(selected_actions) != set(action_primary):
+    filter_summaries.append("施策タイプ: " + ", ".join(selected_actions))
 
 category_summary = summarize_segment_performance(df_view, req_rate, "category")
 customer_summary = summarize_segment_performance(df_view, req_rate, "major_customer")
@@ -1104,7 +1349,9 @@ fig_kpi = _apply_plotly_theme(fig_kpi, legend_bottom=True)
 st.plotly_chart(fig_kpi, use_container_width=True, config=_build_plotly_config())
 
 ai_insights = {
-    "top_underperformers": top_list[["product_name", "gap", "roi_months"]].head(3).to_dict("records")
+    "top_underperformers": top_list[
+        ["product_name", "gap", "roi_months", "best_action_label", "best_monthly_benefit"]
+    ].head(3).to_dict("records")
     if not top_list.empty
     else [],
     "anomaly_summary": anomaly_summary_stats.to_dict("records"),
@@ -1442,37 +1689,128 @@ st.divider()
 
 # Actionable SKU Top List
 st.subheader("要対策SKUトップリスト")
-st.caption("ギャップ = 必要賃率 - 付加価値/分")
+st.caption("ギャップ = 必要賃率 - 付加価値/分。優先度は推定月次効果 ÷ 想定投資額で算出しています。")
+if filter_summaries:
+    st.caption("適用中フィルター: " + " / ".join(filter_summaries))
 top5 = top_cards
 if len(top5) > 0:
     card_cols = st.columns(len(top5))
     for col, row in zip(card_cols, top5.to_dict("records")):
-        roi_txt = "N/A" if pd.isna(row.get("roi_months")) else f"{row['roi_months']:.1f}"
-        gap_txt = "N/A" if pd.isna(row.get("gap")) else f"{row['gap']:.2f}"
-        col.metric(row["product_name"], gap_txt, delta=f"ROI {roi_txt}月")
-        col.caption(
-            " / ".join(
-                [
-                    f"価格+{row['price_improve']:.1f}" if not pd.isna(row.get("price_improve")) else "価格改善情報なし",
-                    f"CT-{row['ct_improve']:.2f}" if not pd.isna(row.get("ct_improve")) else "CT改善情報なし",
-                    f"材料-{row['material_improve']:.1f}" if not pd.isna(row.get("material_improve")) else "材料改善情報なし",
-                ]
-            )
-        )
+        roi_txt = _format_roi(row.get("best_roi_months"))
+        gap_val = row.get("gap")
+        gap_txt = "N/A" if pd.isna(gap_val) else f"{float(gap_val):.2f}円/分"
+        action_label = row.get("best_action_label") or "推奨なし"
+        if action_label == "推奨なし":
+            delta_label = "推奨施策なし"
+        else:
+            delta_label = f"{action_label}｜ROI {roi_txt}月"
+        col.metric(row.get("product_name", "不明"), gap_txt, delta=delta_label)
 
-    table = top_list[[
-        "product_no","product_name","gap","price_improve","ct_improve","material_improve","roi_months"
-    ]].rename(columns={
-        "product_no":"製品番号",
-        "product_name":"製品名",
-        "gap":"ギャップ",
-        "price_improve":"価格改善",
-        "ct_improve":"CT改善",
-        "material_improve":"材料改善",
-        "roi_months":"想定ROI(月)"
-    })
+        price_val = row.get("price_improve")
+        ct_val = row.get("ct_improve")
+        material_val = row.get("material_improve")
+        price_txt = (
+            f"価格+{float(price_val):,.0f}円"
+            if price_val is not None and not pd.isna(price_val) and float(price_val) > 0
+            else "価格改善情報なし"
+        )
+        ct_txt = (
+            f"CT-{float(ct_val):.2f}分"
+            if ct_val is not None and not pd.isna(ct_val) and float(ct_val) > 0
+            else "CT改善情報なし"
+        )
+        material_txt = (
+            f"材料-{float(material_val):,.0f}円"
+            if material_val is not None and not pd.isna(material_val) and float(material_val) > 0
+            else "材料改善情報なし"
+        )
+        benefit_txt = _format_currency(row.get("best_monthly_benefit"))
+        col.caption(f"{' / '.join([price_txt, ct_txt, material_txt])}｜月次効果 ≈ {benefit_txt}")
+
+    rename_map = {
+        "product_no": "製品番号",
+        "product_name": "製品名",
+        "best_action_label": "推奨施策",
+        "gap": "ギャップ(円/分)",
+        "monthly_shortfall_value": "不足額/月(円)",
+        "price_improve": "価格改善(円/個)",
+        "ct_improve": "CT改善(分/個)",
+        "material_improve": "材料改善(円/個)",
+        "best_monthly_benefit": "推定月次効果(円)",
+        "best_investment": "想定投資額(円)",
+        "best_roi_months": "想定ROI(月)",
+        "best_score": "優先度スコア(1/月)",
+    }
+    columns = [
+        "product_no",
+        "product_name",
+        "best_action_label",
+        "gap",
+        "monthly_shortfall_value",
+        "price_improve",
+        "ct_improve",
+        "material_improve",
+        "best_monthly_benefit",
+        "best_investment",
+        "best_roi_months",
+        "best_score",
+    ]
+    table = top_list[columns].rename(columns=rename_map)
     table.insert(0, "選択", False)
-    edited = st.data_editor(table, use_container_width=True, key="action_sku_editor")
+    column_config = {
+        "選択": st.column_config.CheckboxColumn("選択", help="シナリオに転送するSKUを選択"),
+        "製品番号": st.column_config.TextColumn("製品番号"),
+        "製品名": st.column_config.TextColumn("製品名"),
+        "推奨施策": st.column_config.TextColumn("推奨施策"),
+        "ギャップ(円/分)": st.column_config.NumberColumn("ギャップ(円/分)", format="%.2f"),
+        "不足額/月(円)": st.column_config.NumberColumn(
+            "不足額/月(円)",
+            format="%.0f",
+            help="(必要賃率−現状VA/分)×分/個×日産数×稼働日数",
+        ),
+        "価格改善(円/個)": st.column_config.NumberColumn(
+            "価格改善(円/個)",
+            format="%.0f",
+            help="必要販売単価 − 現在の販売単価",
+        ),
+        "CT改善(分/個)": st.column_config.NumberColumn(
+            "CT改善(分/個)",
+            format="%.2f",
+            help="現状分/個 − 達成に必要な分/個",
+        ),
+        "材料改善(円/個)": st.column_config.NumberColumn(
+            "材料改善(円/個)",
+            format="%.0f",
+            help="現状材料費 − 目標材料費",
+        ),
+        "推定月次効果(円)": st.column_config.NumberColumn(
+            "推定月次効果(円)",
+            format="%.0f",
+            help="推奨施策を実行した場合の月次インパクト",
+        ),
+        "想定投資額(円)": st.column_config.NumberColumn(
+            "想定投資額(円)",
+            format="%.0f",
+            help="設定した施策別の想定投資額",
+        ),
+        "想定ROI(月)": st.column_config.NumberColumn(
+            "想定ROI(月)",
+            format="%.1f",
+            help="想定投資額 ÷ 推定月次効果",
+        ),
+        "優先度スコア(1/月)": st.column_config.NumberColumn(
+            "優先度スコア(1/月)",
+            format="%.2f",
+            help="推定月次効果 ÷ 想定投資額。1.0で1か月回収",
+        ),
+    }
+    edited = st.data_editor(
+        table,
+        use_container_width=True,
+        key="action_sku_editor",
+        column_config=column_config,
+        hide_index=True,
+    )
     csv_top = edited.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
         "CSV出力",
@@ -1484,8 +1822,10 @@ if len(top5) > 0:
     if st.button("シナリオに反映"):
         st.session_state["selected_action_skus"] = selected
         st.success(f"{len(selected)}件をシナリオに反映しました")
-else:
+elif gap_df.empty:
     st.info("要対策SKUはありません。")
+else:
+    st.info("設定した条件に合致する要対策SKUはありません。")
 
 st.subheader("セグメント分析（カテゴリー/顧客）")
 st.caption("平均VA/分と必要賃率との差、達成率、ROIをセグメント単位で比較します。")
