@@ -2036,6 +2036,9 @@ priority_state.setdefault("ct_cost", 600000.0)
 priority_state.setdefault("material_cost", 400000.0)
 priority_state.setdefault("roi_limit", 3.0)
 priority_state.setdefault("apply_roi_filter", False)
+priority_state.setdefault("roi_priority_high", 2.0)
+priority_state.setdefault("roi_priority_medium", 4.0)
+priority_state.setdefault("investment_executable", 500000.0)
 priority_state.setdefault(
     "action_filter",
     ["価格改善", "リードタイム改善", "材料改善"],
@@ -2100,6 +2103,33 @@ with st.expander("優先順位付けロジック & フィルター設定", expan
             "ROI上限で絞り込む",
             value=bool(priority_state["apply_roi_filter"]),
         )
+        roi_high_input = st.number_input(
+            "優先度『高』と判定するROI閾値 (月)",
+            min_value=0.5,
+            value=float(priority_state["roi_priority_high"]),
+            step=0.5,
+            format="%.1f",
+        )
+        priority_state["roi_priority_high"] = roi_high_input
+        roi_medium_default = max(
+            float(priority_state.get("roi_priority_medium", roi_high_input)),
+            roi_high_input,
+        )
+        roi_medium_input = st.number_input(
+            "優先度『中』の上限ROI閾値 (月)",
+            min_value=roi_high_input,
+            value=roi_medium_default,
+            step=0.5,
+            format="%.1f",
+        )
+        priority_state["roi_priority_medium"] = max(roi_medium_input, roi_high_input)
+        priority_state["investment_executable"] = st.number_input(
+            "即実行できる投資額の上限 (円)",
+            min_value=0.0,
+            value=float(priority_state["investment_executable"]),
+            step=50000.0,
+            format="%.0f",
+        )
         default_actions = [
             opt
             for opt in priority_state.get("action_filter", action_primary)
@@ -2112,6 +2142,14 @@ with st.expander("優先順位付けロジック & フィルター設定", expan
             options=action_all_options,
             default=default_actions,
         )
+    st.markdown(
+        f"- ROIが{priority_state['roi_priority_high']:.1f}ヶ月未満なら優先度『高』、"
+        f"{priority_state['roi_priority_medium']:.1f}ヶ月までは『中』、それ以上は『低』と定義します。"
+    )
+    st.markdown(
+        f"- 想定投資額が{priority_state['investment_executable']:,.0f}円以下なら『即実行可』、"
+        "超える場合は『要投資検討』と表示します。"
+    )
     st.caption(
         "投資額はSKUごとの月次効果に一律で適用します。ROI = 想定投資額 ÷ 月次効果。"
     )
@@ -2120,6 +2158,12 @@ working_days_per_month = float(priority_state.get("working_days_per_month", defa
 price_cost = float(priority_state.get("price_cost", 1.0))
 ct_cost = float(priority_state.get("ct_cost", 1.0))
 material_cost = float(priority_state.get("material_cost", 1.0))
+roi_priority_high = float(priority_state.get("roi_priority_high", 2.0))
+roi_priority_medium = max(
+    float(priority_state.get("roi_priority_medium", roi_priority_high * 2.0)),
+    roi_priority_high,
+)
+investment_threshold = float(priority_state.get("investment_executable", 500000.0))
 roi_limit = float(priority_state.get("roi_limit", 3.0))
 raw_selected_actions = priority_state.get("action_filter", action_primary)
 if not raw_selected_actions:
@@ -2206,6 +2250,28 @@ for key, meta in action_map.items():
     gap_df.loc[mask, "best_investment"] = meta["cost"]
 gap_df["best_roi_months"] = gap_df["best_roi_months"].replace([np.inf, -np.inf], np.nan)
 gap_df["roi_months"] = gap_df["best_roi_months"]
+
+
+def _classify_priority_rank(roi_value: Any) -> str:
+    if roi_value is None or pd.isna(roi_value):
+        return "情報不足"
+    if roi_value <= roi_priority_high:
+        return "高"
+    if roi_value <= roi_priority_medium:
+        return "中"
+    return "低"
+
+
+def _classify_execution(cost_value: Any) -> str:
+    if cost_value is None or pd.isna(cost_value):
+        return "投資額未設定"
+    if cost_value <= investment_threshold:
+        return "即実行可"
+    return "要投資検討"
+
+
+gap_df["priority_rank"] = gap_df["best_roi_months"].apply(_classify_priority_rank)
+gap_df["execution_feasibility"] = gap_df["best_investment"].apply(_classify_execution)
 
 filtered_gap_df = gap_df.copy()
 if selected_actions:
@@ -2889,7 +2955,11 @@ st.divider()
 
 # Actionable SKU Top List
 st.subheader("要対策SKUトップリスト")
-st.caption("ギャップ = 必要賃率 - 付加価値/分。優先度は推定月次効果 ÷ 想定投資額で算出しています。")
+st.caption(
+    "ギャップ = 必要賃率 - 付加価値/分。優先度は推定月次効果 ÷ 想定投資額で算出しています。\n"
+    f"優先度ランク: ROI≦{roi_priority_high:.1f}ヶ月は『高』、ROI≦{roi_priority_medium:.1f}ヶ月までは『中』、それ以上は『低』。\n"
+    f"実行可否: 想定投資額≦{investment_threshold:,.0f}円なら『即実行可』と判定します。"
+)
 if filter_summaries:
     st.caption("適用中フィルター: " + " / ".join(filter_summaries))
 top5 = top_cards
@@ -2905,6 +2975,15 @@ if len(top5) > 0:
         else:
             delta_label = f"{action_label}｜ROI {roi_txt}月"
         col.metric(row.get("product_name", "不明"), gap_txt, delta=delta_label)
+        badge_parts: List[str] = []
+        priority_label = row.get("priority_rank")
+        execution_label = row.get("execution_feasibility")
+        if priority_label and isinstance(priority_label, str):
+            badge_parts.append(f"優先度:{priority_label}")
+        if execution_label and isinstance(execution_label, str):
+            badge_parts.append(execution_label)
+        if badge_parts:
+            _render_target_badge(col, " / ".join(badge_parts))
 
         price_val = row.get("price_improve")
         ct_val = row.get("ct_improve")
@@ -2940,6 +3019,8 @@ if len(top5) > 0:
         "best_investment": "想定投資額(円)",
         "best_roi_months": "想定ROI(月)",
         "best_score": "優先度スコア(1/月)",
+        "priority_rank": "優先度ランク",
+        "execution_feasibility": "実行可否",
     }
     columns = [
         "product_no",
@@ -2953,6 +3034,8 @@ if len(top5) > 0:
         "best_monthly_benefit",
         "best_investment",
         "best_roi_months",
+        "priority_rank",
+        "execution_feasibility",
         "best_score",
     ]
     table = top_list[columns].rename(columns=rename_map)
@@ -2997,6 +3080,20 @@ if len(top5) > 0:
             "想定ROI(月)",
             format="%.1f",
             help="想定投資額 ÷ 推定月次効果",
+        ),
+        "優先度ランク": st.column_config.TextColumn(
+            "優先度ランク",
+            help=(
+                f"ROI≦{roi_priority_high:.1f}ヶ月は『高』、ROI≦{roi_priority_medium:.1f}ヶ月までは『中』、"
+                "それ以上は『低』として判定"
+            ),
+        ),
+        "実行可否": st.column_config.TextColumn(
+            "実行可否",
+            help=(
+                f"想定投資額≦{investment_threshold:,.0f}円で『即実行可』、超える場合は『要投資検討』。"
+                "投資額が未設定の施策は『投資額未設定』。"
+            ),
         ),
         "優先度スコア(1/月)": st.column_config.NumberColumn(
             "優先度スコア(1/月)",
