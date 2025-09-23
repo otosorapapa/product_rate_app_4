@@ -1,6 +1,14 @@
+from io import BytesIO
+
 import pandas as pd
 
-from utils import detect_anomalies, detect_quality_issues
+from utils import (
+    detect_anomalies,
+    detect_quality_issues,
+    generate_product_template,
+    parse_products,
+    validate_product_dataframe,
+)
 
 
 def test_detect_quality_issues():
@@ -41,3 +49,69 @@ def test_detect_anomalies_highlights_extreme_values():
     target = anomalies[anomalies["product_no"] == 4].iloc[0]
     assert target["direction"] in {"high", "low"}
     assert target["severity"] > 3.5
+
+
+def test_validate_product_dataframe_detects_unit_mismatch():
+    df = pd.DataFrame(
+        {
+            "product_no": ["SKU-1"],
+            "product_name": ["テスト商品"],
+            "actual_unit_price": [150.0],
+            "material_unit_cost": [80.0],
+            "minutes_per_unit": [4.5],
+            "daily_qty": [120.0],
+        }
+    )
+    df.attrs["column_unit_info"] = {
+        "product_no": {"unit": "コード", "source": "製品№"},
+        "product_name": {"unit": "テキスト", "source": "製品名"},
+        "actual_unit_price": {"unit": "千円/個", "source": "販売単価 (千円/個)"},
+        "material_unit_cost": {"unit": "円/個", "source": "原価（材料費）"},
+        "minutes_per_unit": {"unit": "分/個", "source": "リードタイム (分/個)"},
+        "daily_qty": {"unit": "個/日", "source": "日産数 (個/日)"},
+    }
+
+    errors, warnings, detail = validate_product_dataframe(df)
+    assert any("単位" in msg for msg in errors)
+    target = detail[detail["項目"] == "販売単価（円/個）"].iloc[0]
+    assert "千円/個" in str(target["内容"]) or "千円/個" in str(target["入力値"])
+    assert "テンプレート" in str(target["対処方法"])
+
+
+def test_validate_product_dataframe_warns_when_unit_missing():
+    df = pd.DataFrame(
+        {
+            "product_no": ["SKU-2"],
+            "product_name": ["検証用"],
+            "actual_unit_price": [220.0],
+            "material_unit_cost": [150.0],
+            "minutes_per_unit": [6.0],
+            "daily_qty": [90.0],
+        }
+    )
+    df.attrs["column_unit_info"] = {
+        "product_no": {"unit": "コード", "source": "製品№"},
+        "product_name": {"unit": "テキスト", "source": "製品名"},
+        "actual_unit_price": {"unit": "円/個", "source": "販売単価"},
+        "material_unit_cost": {"unit": "円/個", "source": "材料費"},
+        "minutes_per_unit": {"unit": None, "source": "リードタイム"},
+        "daily_qty": {"unit": "個/日", "source": "日産数"},
+    }
+
+    errors, warnings, detail = validate_product_dataframe(df)
+    assert not errors
+    assert any("リードタイム" in msg for msg in warnings)
+    dataset_issue = detail[detail["項目"] == "リードタイム（分/個）"].iloc[0]
+    assert "未設定" in str(dataset_issue["内容"])
+    assert "分/個" in str(dataset_issue["対処方法"])
+
+
+def test_parse_products_retains_unit_metadata_from_template():
+    template_bytes = generate_product_template()
+    xls = pd.ExcelFile(BytesIO(template_bytes))
+    df, warnings = parse_products(xls, sheet_name="R6.12")
+    assert not warnings
+    info = df.attrs.get("column_unit_info")
+    assert info
+    assert info["actual_unit_price"]["unit"] == "円/個"
+    assert info["minutes_per_unit"]["unit"] == "分/個"

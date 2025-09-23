@@ -133,6 +133,32 @@ if file is not None or "df_products_raw" not in st.session_state:
             "※ サンプルデータには製品名から推定したカテゴリーと主要顧客を自動付与しています。"
         )
 
+        unit_info = df_products.attrs.get("column_unit_info")
+        if not isinstance(unit_info, dict):
+            unit_info = {}
+
+        def _ensure_unit(column_key: str, unit_label: str) -> None:
+            entry = unit_info.get(column_key)
+            if not isinstance(entry, dict):
+                entry = {"unit": None, "source": "サンプルデータ"}
+            if not entry.get("unit"):
+                entry["unit"] = unit_label
+            entry.setdefault("source", "サンプルデータ")
+            unit_info[column_key] = entry
+
+        sample_unit_defaults = {
+            "product_no": "コード",
+            "product_name": "テキスト",
+            "actual_unit_price": "円/個",
+            "material_unit_cost": "円/個",
+            "minutes_per_unit": "分/個",
+            "daily_qty": "個/日",
+        }
+        for key, unit_label in sample_unit_defaults.items():
+            _ensure_unit(key, unit_label)
+
+        df_products.attrs["column_unit_info"] = unit_info
+
     errors, val_warnings, detail_df = validate_product_dataframe(df_products)
     for msg in val_warnings:
         st.warning(msg)

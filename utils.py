@@ -33,6 +33,53 @@ CATEGORY_KEYWORDS = {
 }
 
 
+def split_column_and_unit(value: Any) -> Tuple[Any, Optional[str]]:
+    """Split a column label into base text and unit text."""
+
+    if not isinstance(value, str):
+        return value, None
+
+    text = value.replace("\n", "").strip()
+    if not text:
+        return text, None
+
+    text = text.replace("（", "(").replace("）", ")")
+    if text.endswith(")") and "(" in text:
+        base, unit = text.rsplit("(", 1)
+        unit = unit[:-1].strip()
+        normalized = unit.replace(" ", "").replace("　", "").replace("／", "/").lower()
+        unit_keywords = {"コード", "名称", "テキスト", "任意", "code", "name", "text", "optional"}
+        if (
+            "/" in normalized
+            or "円" in unit
+            or "個" in unit
+            or "分" in unit
+            or "日" in unit
+            or normalized in unit_keywords
+            or unit in unit_keywords
+        ):
+            return base.strip(), unit
+        # treat parentheses as part of the header label (e.g., 製品№ (1))
+        return text, None
+    return text, None
+
+
+def normalize_unit_text(unit: Optional[str]) -> Optional[str]:
+    """Normalize unit strings for consistent comparison."""
+
+    if unit in [None, ""]:
+        return None
+
+    text = str(unit)
+    text = text.replace("（", "(").replace("）", ")")
+    text = text.replace("／", "/")
+    text = text.replace(" ", "").replace("　", "")
+    text = text.lower()
+    if "(" in text:
+        text = text.split("(", 1)[0]
+    return text
+
+
 def infer_category_from_name(name: Any) -> str:
     """Infer a coarse product category from its name."""
 
@@ -227,26 +274,6 @@ def parse_products(xls: pd.ExcelFile, sheet_name: str="R6.12") -> Tuple[pd.DataF
         "備考", "備考 (任意)",
         "カテゴリ", "カテゴリー", "主要顧客", "主要取引先", "メイン顧客",
     ]
-    keep = [k for k in dict.fromkeys(keep_candidates) if k in data.columns]
-    df = data[keep].copy()
-
-    def to_float(x):
-        try:
-            if x in ["", None, np.nan]:
-                return np.nan
-            return float(str(x).replace(",", ""))
-        except Exception:
-            return np.nan
-
-    text_columns = {
-        "製品№ (1)", "製品名 (大福生地)", "製品№", "製品番号", "製品番号 (コード)",
-        "製品№ (コード)", "製品名", "製品名 (名称)", "備考", "備考 (任意)",
-        "カテゴリ", "カテゴリー", "主要顧客", "主要取引先", "メイン顧客",
-    }
-    for col in df.columns:
-        if col not in text_columns:
-            df[col] = df[col].map(to_float)
-
     rename_map = {
         "製品№ (1)": "product_no",
         "製品名 (大福生地)": "product_name",
@@ -290,7 +317,70 @@ def parse_products(xls: pd.ExcelFile, sheet_name: str="R6.12") -> Tuple[pd.DataF
         "主要取引先": "major_customer",
         "メイン顧客": "major_customer",
     }
-    df = df.rename(columns={k:v for k,v in rename_map.items() if k in df.columns})
+    candidate_keys = list(dict.fromkeys(keep_candidates))
+    base_to_columns: Dict[str, List[str]] = {}
+    for col in data.columns:
+        if not isinstance(col, str):
+            continue
+        base, _ = split_column_and_unit(col)
+        if isinstance(base, str):
+            base_to_columns.setdefault(base, []).append(col)
+
+    selected_columns: List[str] = []
+    used_columns: set[str] = set()
+    used_targets: set[str] = set()
+    for candidate in candidate_keys:
+        target_column = None
+        if candidate in data.columns and candidate not in used_columns:
+            target_column = candidate
+        else:
+            base_candidate, _ = split_column_and_unit(candidate)
+            for actual in base_to_columns.get(base_candidate, []):
+                if actual not in used_columns:
+                    target_column = actual
+                    break
+        if target_column is None:
+            continue
+        base_name, _ = split_column_and_unit(target_column)
+        normalized_key = rename_map.get(target_column) or rename_map.get(base_name)
+        final_key = normalized_key or base_name
+        if final_key in used_targets:
+            continue
+        selected_columns.append(target_column)
+        used_columns.add(target_column)
+        used_targets.add(final_key)
+
+    df = data[selected_columns].copy()
+
+    def to_float(x):
+        try:
+            if x in ["", None, np.nan]:
+                return np.nan
+            return float(str(x).replace(",", ""))
+        except Exception:
+            return np.nan
+
+    text_columns = {
+        "製品№ (1)", "製品名 (大福生地)", "製品№", "製品番号", "製品番号 (コード)",
+        "製品№ (コード)", "製品名", "製品名 (名称)", "備考", "備考 (任意)",
+        "カテゴリ", "カテゴリー", "主要顧客", "主要取引先", "メイン顧客",
+    }
+    for col in df.columns:
+        if col not in text_columns:
+            df[col] = df[col].map(to_float)
+
+    column_unit_info: Dict[str, Dict[str, Any]] = {}
+    original_columns = list(df.columns)
+    for col in original_columns:
+        base, unit = split_column_and_unit(col)
+        normalized_key = rename_map.get(col) or rename_map.get(base)
+        final_key = normalized_key or base
+        existing = column_unit_info.get(final_key)
+        if existing is None or (not existing.get("unit") and unit):
+            column_unit_info[final_key] = {"unit": unit, "source": col}
+
+    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+    df.attrs["column_unit_info"] = column_unit_info
 
     # Core fields
     df["gp_per_unit"] = df.get("actual_unit_price", np.nan) - df.get("material_unit_cost", np.nan)
@@ -398,6 +488,58 @@ TEMPLATE_FIELD_GUIDE: List[Dict[str, Any]] = [
         "サンプル値": "既存ラインA",
     },
 ]
+
+
+UNIT_EXPECTATIONS: Dict[str, Dict[str, Any]] = {
+    "actual_unit_price": {
+        "allowed": {"円/個", "円/pcs", "yen/pcs", "yen/pc"},
+        "expected_display": "円/個",
+        "missing_level": "warning",
+        "mismatch_level": "error",
+        "missing_message": "{label}の単位行が空欄です。テンプレート2行目に『{expected}』と入力してください。",
+        "mismatch_message": "{label}の単位が『{actual}』になっています。テンプレートでは『{expected}』で入力してください。",
+        "missing_detail": "単位が未設定",
+        "mismatch_detail": "単位が{actual}",
+        "missing_action": "価格表の単位を確認し、テンプレートの単位行を{expected}に戻してください。",
+        "mismatch_action": "千円やケース単価で管理している場合は円/個に換算し、テンプレートの単位行を{expected}に修正してください。",
+    },
+    "material_unit_cost": {
+        "allowed": {"円/個", "円/pcs", "yen/pcs", "yen/pc"},
+        "expected_display": "円/個",
+        "missing_level": "warning",
+        "mismatch_level": "error",
+        "missing_message": "{label}の単位行が空欄です。テンプレート2行目に『{expected}』を入力してください。",
+        "mismatch_message": "{label}の単位が『{actual}』になっています。テンプレートでは『{expected}』で入力してください。",
+        "missing_detail": "単位が未設定",
+        "mismatch_detail": "単位が{actual}",
+        "missing_action": "購買データの単位を確認し、テンプレートの単位行を{expected}に戻してください。",
+        "mismatch_action": "千円やケース単位の場合は円/個へ換算し、テンプレートの単位行を{expected}に修正してください。",
+    },
+    "minutes_per_unit": {
+        "allowed": {"分/個", "分/pcs", "min/pcs", "minutes/pcs"},
+        "expected_display": "分/個",
+        "missing_level": "warning",
+        "mismatch_level": "error",
+        "missing_message": "{label}の単位行が空欄です。テンプレート2行目に『{expected}』を入力してください。",
+        "mismatch_message": "{label}の単位が『{actual}』になっています。テンプレートでは『{expected}』で入力してください。",
+        "missing_detail": "単位が未設定",
+        "mismatch_detail": "単位が{actual}",
+        "missing_action": "製造現場に確認し、1個あたりの時間を分単位で記録し、テンプレートの単位行を{expected}にしてください。",
+        "mismatch_action": "時間(hrs)などで管理している場合は分単位に換算し、テンプレートの単位行を{expected}に戻してください。",
+    },
+    "daily_qty": {
+        "allowed": {"個/日", "個/day", "units/day", "個/Day"},
+        "expected_display": "個/日",
+        "missing_level": "warning",
+        "mismatch_level": "error",
+        "missing_message": "{label}の単位行が空欄です。テンプレート2行目に『{expected}』を入力してください。",
+        "mismatch_message": "{label}の単位が『{actual}』になっています。テンプレートでは『{expected}』で入力してください。",
+        "missing_detail": "単位が未設定",
+        "mismatch_detail": "単位が{actual}",
+        "missing_action": "生産管理担当に確認し、1日あたりの数量となるようテンプレートの単位行を{expected}に設定してください。",
+        "mismatch_action": "月間・年間数量の場合は日割りに換算し、テンプレートの単位行を{expected}に修正してください。",
+    },
+}
 
 
 def get_product_template_guide() -> pd.DataFrame:
@@ -552,6 +694,102 @@ def validate_product_dataframe(
                     "対処方法": resolve_detail(action, row),
                 }
             )
+
+    def register_dataset_issue(
+        column_key: str,
+        level: str,
+        message: str,
+        detail: str,
+        value: str = "",
+        action: Any = None,
+    ) -> None:
+        label = column_info.get(column_key, {}).get("label", column_key)
+        detail_text = resolve_detail(detail, pd.Series(dtype=object))
+        action_text = resolve_detail(action, pd.Series(dtype=object))
+        if level == "error":
+            errors.append(message)
+        else:
+            warnings.append(message)
+        detail_rows.append(
+            {
+                "レベル": "エラー" if level == "error" else "警告",
+                "製品番号": "全体",
+                "製品名": "",
+                "項目": label,
+                "内容": detail_text,
+                "入力値": value,
+                "対処方法": action_text,
+            }
+        )
+
+    column_unit_info = df.attrs.get("column_unit_info") or {}
+    if not isinstance(column_unit_info, dict):
+        column_unit_info = {}
+
+    if column_unit_info:
+        for col, config in UNIT_EXPECTATIONS.items():
+            if col not in df.columns:
+                continue
+            info = column_unit_info.get(col, {})
+            if not isinstance(info, dict):
+                info = {"unit": info, "source": None}
+            actual_unit = info.get("unit")
+            normalized_actual = normalize_unit_text(actual_unit)
+            allowed_raw = config.get("allowed", set())
+            allowed_normalized = set()
+            for candidate_unit in allowed_raw:
+                normalized_candidate = normalize_unit_text(candidate_unit)
+                if normalized_candidate:
+                    allowed_normalized.add(normalized_candidate)
+            expected_display = config.get("expected_display")
+            if not expected_display:
+                for candidate in allowed_raw:
+                    if candidate:
+                        expected_display = candidate
+                        break
+            label = column_info.get(col, {}).get("label", col)
+
+            if not normalized_actual:
+                message = config["missing_message"].format(
+                    label=label, expected=expected_display or ""
+                )
+                detail = config.get("missing_detail", "単位が未設定")
+                action = config.get("missing_action")
+                if action:
+                    action = action.format(expected=expected_display or "")
+                register_dataset_issue(
+                    col,
+                    config.get("missing_level", "warning"),
+                    message,
+                    detail,
+                    value=str(actual_unit or ""),
+                    action=action,
+                )
+            elif allowed_normalized and normalized_actual not in allowed_normalized:
+                actual_display = actual_unit if actual_unit not in [None, ""] else normalized_actual
+                message = config["mismatch_message"].format(
+                    label=label,
+                    actual=actual_display,
+                    expected=expected_display or "",
+                )
+                detail = config.get("mismatch_detail", "単位が不正").format(
+                    actual=actual_display,
+                    expected=expected_display or "",
+                )
+                action = config.get("mismatch_action")
+                if action:
+                    action = action.format(
+                        expected=expected_display or "",
+                        actual=actual_display,
+                    )
+                register_dataset_issue(
+                    col,
+                    config.get("mismatch_level", "error"),
+                    message,
+                    detail,
+                    value=str(actual_display),
+                    action=action,
+                )
 
     missing_summary_hints = {
         "product_no": "製品マスタ台帳を確認して一意の番号を入力してください。",
