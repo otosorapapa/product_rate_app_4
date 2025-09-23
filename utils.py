@@ -614,6 +614,21 @@ def validate_product_dataframe(
     warnings: List[str] = []
     detail_rows: List[Dict[str, Any]] = []
 
+    detail_templates: Dict[str, str] = {
+        "未入力": "{label}が未入力です。",
+        "単位が未設定": "{label}の単位が未設定です。",
+        "単位が不正": "{label}の単位が想定と異なります。",
+        "製品番号が重複": "{label}が別の行と重複しています。",
+        "リードタイムが0以下": "{label}が0以下の値になっています。",
+        "販売単価が0以下": "{label}が0以下の値になっています。",
+        "材料費が負の値": "{label}が負の値になっています。",
+        "日産数が0以下": "{label}が0以下の値になっています。",
+        "リードタイムが600分超": "{label}が600分を超えています。単位の桁を確認してください。",
+        "リードタイムが0.1分未満": "{label}が0.1分未満です。秒単位のままになっていないか確認してください。",
+        "日産数が10,000個超": "{label}が10,000個/日を超えています。月次や年間の値を入力していないか確認してください。",
+        "日産数が20,000個超": "{label}が20,000個/日を超えています。日割り換算が必要な可能性があります。",
+    }
+
     column_info: Dict[str, Dict[str, Any]] = {
         "product_no": {"label": "製品番号", "missing_level": "error"},
         "product_name": {"label": "製品名", "missing_level": "error"},
@@ -646,15 +661,57 @@ def validate_product_dataframe(
         )
     if missing_columns:
         return errors, warnings, pd.DataFrame(
-            columns=["レベル", "製品番号", "製品名", "項目", "内容", "入力値", "対処方法"]
+            columns=["レベル", "製品番号", "製品名", "項目", "原因/状況", "入力値", "対処方法"]
         )
 
-    def resolve_detail(detail: Any, row: pd.Series) -> Any:
-        if detail is None:
+    def resolve_value(value: Any, row: pd.Series) -> str:
+        if value is None:
             return ""
-        if callable(detail):
-            return detail(row)
-        return detail
+        try:
+            if callable(value):
+                value = value(row)
+        except Exception:
+            # If the callable expects fields that are not available we fall back to an
+            # empty string rather than breaking the validation flow.
+            value = ""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        return str(value).strip()
+
+    def ensure_sentence(text: str) -> str:
+        if not text:
+            return ""
+        text = text.strip()
+        if not text:
+            return ""
+        if text.endswith(("。", "！", "？", ".", "!", "?", "）", ")", "】", "]", "」")):
+            return text
+        return text + "。"
+
+    def format_detail_text(label: str, detail: Any, row: pd.Series) -> str:
+        resolved = resolve_value(detail, row)
+        if not resolved:
+            return ensure_sentence(f"{label}の値を確認してください。")
+        template = detail_templates.get(resolved)
+        if template:
+            text = template.format(label=label)
+        elif "{label}" in resolved:
+            text = resolved.format(label=label)
+        else:
+            text = resolved
+            if label and label not in text and all(ch not in text for ch in ["＝", "=", ":", "：", "<", ">", "≦", "≧"]):
+                text = f"{label}：{text}"
+        return ensure_sentence(text)
+
+    def format_action_text(label: str, action: Any, row: pd.Series) -> str:
+        resolved = resolve_value(action, row)
+        if not resolved:
+            return ensure_sentence(f"{label}の入力内容を担当部署に確認してください。")
+        if "{label}" in resolved:
+            resolved = resolved.format(label=label)
+        return ensure_sentence(resolved)
 
     def register_issue(
         mask: pd.Series,
@@ -689,9 +746,9 @@ def validate_product_dataframe(
                     "製品番号": row.get("product_no"),
                     "製品名": row.get("product_name"),
                     "項目": label,
-                    "内容": resolve_detail(detail, row),
+                    "原因/状況": format_detail_text(label, detail, row),
                     "入力値": raw_value,
-                    "対処方法": resolve_detail(action, row),
+                    "対処方法": format_action_text(label, action, row),
                 }
             )
 
@@ -704,8 +761,9 @@ def validate_product_dataframe(
         action: Any = None,
     ) -> None:
         label = column_info.get(column_key, {}).get("label", column_key)
-        detail_text = resolve_detail(detail, pd.Series(dtype=object))
-        action_text = resolve_detail(action, pd.Series(dtype=object))
+        pseudo_row = pd.Series(dtype=object)
+        detail_text = format_detail_text(label, detail, pseudo_row)
+        action_text = format_action_text(label, action, pseudo_row)
         if level == "error":
             errors.append(message)
         else:
@@ -716,7 +774,7 @@ def validate_product_dataframe(
                 "製品番号": "全体",
                 "製品名": "",
                 "項目": label,
-                "内容": detail_text,
+                "原因/状況": detail_text,
                 "入力値": value,
                 "対処方法": action_text,
             }
@@ -965,7 +1023,7 @@ def validate_product_dataframe(
 
     detail_df = pd.DataFrame(
         detail_rows,
-        columns=["レベル", "製品番号", "製品名", "項目", "内容", "入力値", "対処方法"],
+        columns=["レベル", "製品番号", "製品名", "項目", "原因/状況", "入力値", "対処方法"],
     )
 
     return errors, warnings, detail_df

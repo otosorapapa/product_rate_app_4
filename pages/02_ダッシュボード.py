@@ -120,6 +120,52 @@ METRIC_LABELS = {
     "required_selling_price": "必要販売単価",
 }
 
+ANOMALY_REVIEW_CHOICES: List[Dict[str, Any]] = [
+    {
+        "key": "exception",
+        "label": "例外的な値として許容",
+        "description": "商流の急変や季節要因など正当な理由がある異常値として扱います。",
+        "requires_value": False,
+    },
+    {
+        "key": "input_error",
+        "label": "誤入力として修正",
+        "description": "入力ミスと判断し訂正値を登録します。保存すると即時にダッシュボードへ反映されます。",
+        "requires_value": True,
+    },
+    {
+        "key": "monitor",
+        "label": "要調査として記録",
+        "description": "原因調査中の異常値として扱い、メモだけ残しておきます。",
+        "requires_value": False,
+    },
+]
+
+ANOMALY_REVIEW_LABELS: Dict[str, str] = {
+    choice["key"]: choice["label"] for choice in ANOMALY_REVIEW_CHOICES
+}
+ANOMALY_REVIEW_DESCRIPTIONS: Dict[str, str] = {
+    choice["key"]: choice.get("description", "") for choice in ANOMALY_REVIEW_CHOICES
+}
+ANOMALY_REVIEW_REQUIRES_VALUE: Dict[str, bool] = {
+    choice["key"]: bool(choice.get("requires_value")) for choice in ANOMALY_REVIEW_CHOICES
+}
+ANOMALY_REVIEW_UNSET_LABEL = "未分類"
+
+
+def _normalize_review_classification(record: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Resolve the stored review classification from legacy or new schema."""
+
+    if not record:
+        return None
+    classification = record.get("classification")
+    if classification:
+        return classification
+    decision = record.get("decision")
+    if decision == "corrected":
+        return "input_error"
+    return decision
+
 st.markdown(
     """
     <style>
@@ -1908,10 +1954,31 @@ target_ach_rate = st.session_state["target_ach_rate"]
 
 anomaly_all_df = detect_anomalies(df_view)
 review_state = st.session_state.get("anomaly_review", {})
+legacy_refreshed = False
+for _key, record in list(review_state.items()):
+    if not isinstance(record, dict):
+        continue
+    resolved = _normalize_review_classification(record)
+    if resolved and record.get("classification") != resolved:
+        record["classification"] = resolved
+        legacy_refreshed = True
+    if resolved and not record.get("classification_label"):
+        record["classification_label"] = ANOMALY_REVIEW_LABELS.get(resolved)
+        legacy_refreshed = True
+if legacy_refreshed:
+    st.session_state["anomaly_review"] = review_state
 if not anomaly_all_df.empty:
     key_series = anomaly_all_df["product_no"].apply(_sku_to_str) + "::" + anomaly_all_df["metric"].astype(str)
     anomaly_all_df = anomaly_all_df.assign(key=key_series)
-    anomaly_all_df["decision"] = anomaly_all_df["key"].map(lambda k: review_state.get(k, {}).get("decision"))
+    anomaly_all_df["decision"] = anomaly_all_df["key"].map(
+        lambda k: review_state.get(k, {}).get("decision")
+    )
+    anomaly_all_df["classification"] = anomaly_all_df["key"].map(
+        lambda k: _normalize_review_classification(review_state.get(k, {}))
+    )
+    anomaly_all_df["classification_label"] = anomaly_all_df["classification"].map(
+        lambda code: ANOMALY_REVIEW_LABELS.get(code)
+    )
     anomaly_all_df["note"] = anomaly_all_df["key"].map(lambda k: review_state.get(k, {}).get("note"))
     anomaly_all_df["corrected_value"] = anomaly_all_df["key"].map(
         lambda k: review_state.get(k, {}).get("corrected_value")
@@ -1919,7 +1986,7 @@ if not anomaly_all_df.empty:
     anomaly_all_df["last_decided_at"] = anomaly_all_df["key"].map(
         lambda k: review_state.get(k, {}).get("timestamp")
     )
-    anomaly_df = anomaly_all_df[anomaly_all_df["decision"] != "exception"].copy()
+    anomaly_df = anomaly_all_df[anomaly_all_df["classification"] != "exception"].copy()
 else:
     anomaly_df = anomaly_all_df
 
@@ -2443,7 +2510,7 @@ if anomaly_df.empty:
     if anomaly_all_df.empty:
         st.success("統計的な異常値は検出されませんでした。")
     else:
-        st.info("検出された異常値はすべて市場価格の変更として例外扱いされています。下部のレビューで再評価できます。")
+        st.info("検出された異常値はすべて『例外的な値』として除外済みです。必要に応じて下部のレビューから再評価できます。")
 else:
     highlight = anomaly_df.sort_values("severity", ascending=False).head(3)
     if not highlight.empty:
@@ -2466,7 +2533,18 @@ else:
     detail_source = (
         anomaly_df.sort_values("severity", ascending=False)
         .head(20)
-        .drop(columns=["key", "decision", "note", "corrected_value", "last_decided_at"], errors="ignore")
+        .drop(
+            columns=[
+                "key",
+                "decision",
+                "classification",
+                "classification_label",
+                "note",
+                "corrected_value",
+                "last_decided_at",
+            ],
+            errors="ignore",
+        )
     )
     detail_df = detail_source.rename(
         columns={
@@ -2491,8 +2569,10 @@ if not anomaly_all_df.empty:
             st.caption("現在レビュー対象の異常値はありません。")
         else:
             records = review_candidates.to_dict("records")
-            options = ["未判定", "市場価格の変更 (Yes)", "誤入力を修正する (No)"]
-            decisions = []
+            classification_labels = [choice["label"] for choice in ANOMALY_REVIEW_CHOICES]
+            label_to_key = {choice["label"]: choice["key"] for choice in ANOMALY_REVIEW_CHOICES}
+            options = [ANOMALY_REVIEW_UNSET_LABEL] + classification_labels
+            decisions: List[Dict[str, Any]] = []
             with st.form("anomaly_review_form"):
                 for idx, row in enumerate(records):
                     key = row["key"]
@@ -2521,28 +2601,38 @@ if not anomaly_all_df.empty:
                     value_txt = _format_number(value)
                     question = (
                         f"製品番号{product_no_display}（{product_name}）の{metric_label}が"
-                        f"{median_txt}に対して{value_txt}（{ratio_txt}）です。市場価格の変更（Yes/No）？"
+                        f"{median_txt}に対して{value_txt}（{ratio_txt}）です。"
                     )
                     row["question"] = question
                     st.markdown(f"**{product_no_display}｜{product_name}**")
                     st.caption(
                         f"{metric_label}: 現在値 {value_txt} / 中央値 {median_txt}｜{direction_txt}｜Z≈{severity_txt}"
                     )
+                    st.caption(question)
                     existing = review_state.get(key, {})
+                    existing_classification = _normalize_review_classification(existing)
                     default_index = 0
-                    if existing.get("decision") == "exception":
-                        default_index = 1
-                    elif existing.get("decision") == "corrected":
-                        default_index = 2
-                    choice = st.radio(
-                        question,
+                    if existing_classification:
+                        existing_label = ANOMALY_REVIEW_LABELS.get(existing_classification)
+                        if existing_label and existing_label in classification_labels:
+                            default_index = classification_labels.index(existing_label) + 1
+                    choice_label = st.radio(
+                        "分類を選択してください。",
                         options=options,
                         index=default_index,
                         horizontal=True,
                         key=f"decision_{key}",
                     )
+                    if choice_label == ANOMALY_REVIEW_UNSET_LABEL:
+                        classification_key = None
+                    else:
+                        classification_key = label_to_key.get(choice_label)
+                    if classification_key:
+                        desc = ANOMALY_REVIEW_DESCRIPTIONS.get(classification_key)
+                        if desc:
+                            st.caption(f"分類メモ: {desc}")
                     corrected_value = None
-                    if choice == options[2]:
+                    if classification_key == "input_error":
                         default_value = existing.get("corrected_value", value)
                         if default_value is None or pd.isna(default_value):
                             default_value = (
@@ -2561,7 +2651,15 @@ if not anomaly_all_df.empty:
                         value=existing.get("note", ""),
                         key=f"note_{key}",
                     )
-                    decisions.append((key, choice, corrected_value, note, row))
+                    decisions.append(
+                        {
+                            "key": key,
+                            "classification": classification_key,
+                            "corrected_value": corrected_value,
+                            "note": note,
+                            "row": row,
+                        }
+                    )
                     if idx < len(records) - 1:
                         st.markdown("---")
                 submitted = st.form_submit_button("レビュー結果を保存")
@@ -2580,7 +2678,7 @@ if not anomaly_all_df.empty:
                 def _revert_previous(record: Dict[str, Any]) -> bool:
                     if (
                         not record
-                        or record.get("decision") != "corrected"
+                        or _normalize_review_classification(record) != "input_error"
                         or record.get("original_value") is None
                         or product_no_keys is None
                     ):
@@ -2595,9 +2693,14 @@ if not anomaly_all_df.empty:
                         return True
                     return False
 
-                for key, choice, corrected_value, note, row in decisions:
+                for entry in decisions:
+                    key = entry["key"]
+                    classification = entry["classification"]
+                    corrected_value = entry.get("corrected_value")
+                    note = entry.get("note")
+                    row = entry.get("row", {})
                     existing = review_state.get(key)
-                    if choice == options[0]:
+                    if classification is None:
                         if key in review_map:
                             if _revert_previous(existing):
                                 dataset_changed = True
@@ -2606,7 +2709,6 @@ if not anomaly_all_df.empty:
                         continue
 
                     record = {
-                        "decision": "exception" if choice == options[1] else "corrected",
                         "product_no": row.get("product_no"),
                         "product_no_display": _sku_to_str(row.get("product_no")),
                         "product_name": row.get("product_name"),
@@ -2634,9 +2736,24 @@ if not anomaly_all_df.empty:
                             None if pd.isna(value_now) else float(value_now)
                         )
 
-                    if choice == options[1]:
+                    record["classification"] = classification
+                    record["classification_label"] = ANOMALY_REVIEW_LABELS.get(classification)
+                    if classification == "exception":
+                        record["decision"] = "exception"
                         if _revert_previous(existing):
                             dataset_changed = True
+                        review_map[key] = record
+                        decision_changed = True
+                        continue
+                    if classification == "monitor":
+                        record["decision"] = "monitor"
+                        if _revert_previous(existing):
+                            dataset_changed = True
+                        review_map[key] = record
+                        decision_changed = True
+                        continue
+                    if classification != "input_error":
+                        record["decision"] = classification or ""
                         review_map[key] = record
                         decision_changed = True
                         continue
@@ -2644,6 +2761,7 @@ if not anomaly_all_df.empty:
                     if corrected_value is None:
                         continue
                     corrected_numeric = float(corrected_value)
+                    record["decision"] = "corrected"
                     record["corrected_value"] = corrected_numeric
                     metric = row.get("metric")
                     if product_no_keys is not None and metric in df_full.columns:
@@ -2668,9 +2786,15 @@ history_state = st.session_state.get("anomaly_review", {})
 if history_state:
     history_records = []
     for key, info in history_state.items():
+        classification_code = _normalize_review_classification(info)
+        classification_label = info.get("classification_label") or ANOMALY_REVIEW_LABELS.get(
+            classification_code, "-"
+        )
         history_records.append(
             {
                 "decision": info.get("decision"),
+                "classification": classification_code,
+                "分類": classification_label,
                 "製品番号": info.get("product_no_display")
                 or _sku_to_str(info.get("product_no")),
                 "製品名": info.get("product_name"),
@@ -2693,6 +2817,8 @@ if history_state:
             if df.empty:
                 return df
             df = df.copy()
+            if "classification" in df.columns:
+                df = df.drop(columns=["classification"])
             df["中央値比"] = df["中央値比"].apply(
                 lambda v: f"{float(v):.2f}倍" if v is not None and not pd.isna(v) else "-"
             )
@@ -2706,16 +2832,29 @@ if history_state:
             )
             return df
 
-        exceptions_history = history_df[history_df["decision"] == "exception"].copy()
-        corrections_history = history_df[history_df["decision"] == "corrected"].copy()
+        exceptions_history = history_df[history_df["classification"] == "exception"].copy()
+        corrections_history = history_df[history_df["classification"] == "input_error"].copy()
+        monitor_history = history_df[history_df["classification"] == "monitor"].copy()
 
         if not exceptions_history.empty:
-            cols = ["製品番号", "製品名", "指標", "元の値", "中央値", "中央値比", "逸脱度", "判定日時", "メモ"]
+            cols = [
+                "分類",
+                "製品番号",
+                "製品名",
+                "指標",
+                "元の値",
+                "中央値",
+                "中央値比",
+                "逸脱度",
+                "判定日時",
+                "メモ",
+            ]
             with st.expander("例外として扱う異常値", expanded=False):
                 st.dataframe(_prepare_history(exceptions_history)[cols], use_container_width=True)
 
         if not corrections_history.empty:
             cols = [
+                "分類",
                 "製品番号",
                 "製品名",
                 "指標",
@@ -2729,6 +2868,22 @@ if history_state:
             ]
             with st.expander("訂正済みの異常値", expanded=False):
                 st.dataframe(_prepare_history(corrections_history)[cols], use_container_width=True)
+
+        if not monitor_history.empty:
+            cols = [
+                "分類",
+                "製品番号",
+                "製品名",
+                "指標",
+                "元の値",
+                "中央値",
+                "中央値比",
+                "逸脱度",
+                "判定日時",
+                "メモ",
+            ]
+            with st.expander("要調査として記録した異常値", expanded=False):
+                st.dataframe(_prepare_history(monitor_history)[cols], use_container_width=True)
 
 st.divider()
 
