@@ -6,6 +6,8 @@ if str(BASE_DIR) not in sys.path:
     # instead of any similarly named third-party package that might exist.
     sys.path.insert(0, str(BASE_DIR))
 
+from io import BytesIO
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -33,7 +35,14 @@ from components import (
     render_sidebar_nav,
 )
 import os
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
+
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
 from openai import OpenAI
 
@@ -316,6 +325,97 @@ def _detect_simulation_label(qp: int, qc: int, qm: int) -> str:
     return "カスタム設定"
 
 
+def _resolve_scenario_label(
+    qp: int, qc: int, qm: int, saved: Optional[Dict[str, Dict[str, Any]]]
+) -> str:
+    """Determine the most relevant scenario label for quick simulation values."""
+
+    if saved:
+        for name, config in saved.items():
+            if (
+                int(config.get("quick_price", 0)) == int(qp)
+                and int(config.get("quick_ct", 0)) == int(qc)
+                and int(config.get("quick_material", 0)) == int(qm)
+            ):
+                return str(name)
+    return _detect_simulation_label(qp, qc, qm)
+
+
+def _simulate_scenario(
+    df_template: pd.DataFrame,
+    *,
+    price_pct: float,
+    ct_pct: float,
+    material_pct: float,
+    be_rate: float,
+    req_rate: float,
+    delta_low: float,
+    delta_high: float,
+) -> Tuple[pd.DataFrame, Dict[str, float]]:
+    """Apply percentage adjustments and compute KPI metrics for a scenario."""
+
+    df_sim = df_template.copy()
+    if price_pct:
+        df_sim["actual_unit_price"] *= 1 + float(price_pct) / 100.0
+    if ct_pct:
+        df_sim["minutes_per_unit"] *= 1 + float(ct_pct) / 100.0
+    if material_pct:
+        df_sim["material_unit_cost"] *= 1 + float(material_pct) / 100.0
+
+    df_sim["gp_per_unit"] = df_sim["actual_unit_price"] - df_sim["material_unit_cost"]
+    df_sim["daily_total_minutes"] = df_sim["minutes_per_unit"] * df_sim["daily_qty"]
+    df_sim["daily_va"] = df_sim["gp_per_unit"] * df_sim["daily_qty"]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        df_sim["va_per_min"] = df_sim["daily_va"] / df_sim["daily_total_minutes"]
+
+    df_result = compute_results(df_sim, be_rate, req_rate, delta_low, delta_high)
+    if len(df_result) > 0:
+        ach_rate = float(df_result["meets_required_rate"].mean() * 100.0)
+    else:
+        ach_rate = float("nan")
+
+    if "va_per_min" in df_result and not df_result.empty:
+        avg_vapm = df_result["va_per_min"].replace([np.inf, -np.inf], np.nan).dropna().mean()
+        avg_vapm = float(avg_vapm) if pd.notna(avg_vapm) else float("nan")
+    else:
+        avg_vapm = float("nan")
+
+    if "daily_va" in df_result:
+        daily_total = float(np.nansum(pd.to_numeric(df_result["daily_va"], errors="coerce")))
+    else:
+        daily_total = float("nan")
+
+    return df_result, {
+        "ach_rate": ach_rate,
+        "avg_vapm": avg_vapm,
+        "daily_va_total": daily_total,
+    }
+
+
+def _sanitize_metrics(metrics: Dict[str, float]) -> Dict[str, float]:
+    """Normalize metric dictionary to safe numeric values for display."""
+
+    ach = metrics.get("ach_rate", float("nan"))
+    if not np.isfinite(ach):
+        ach = 0.0
+    avg = metrics.get("avg_vapm", float("nan"))
+    if not np.isfinite(avg):
+        avg = np.nan
+    daily = metrics.get("daily_va_total", 0.0)
+    if not np.isfinite(daily):
+        daily = 0.0
+    return {"ach_rate": ach, "avg_vapm": avg, "daily_va_total": daily}
+
+
+def _format_adjustment_summary(adjustments: Dict[str, Any]) -> str:
+    """Return a compact text description of percentage adjustments."""
+
+    qp = int(adjustments.get("quick_price", 0))
+    qc = int(adjustments.get("quick_ct", 0))
+    qm = int(adjustments.get("quick_material", 0))
+    return f"価格{qp:+d}%・CT{qc:+d}%・材料{qm:+d}%"
+
+
 def _format_fermi_estimate(delta_daily_va: float, working_days: float, scenario_label: str) -> str:
     """Build a short Fermi style estimate text for annual profit impact."""
 
@@ -542,10 +642,6 @@ render_page_tutorial("dashboard")
 render_stepper(4)
 scenario_name = st.session_state.get("current_scenario", "ベース")
 st.caption(f"適用中シナリオ: {scenario_name}")
-scenario_options = ["ベース", "施策A"]
-selected_scenarios = st.multiselect(
-    "シナリオ選択", scenario_options, default=scenario_options
-)
 st.session_state.setdefault("quick_price", 0)
 st.session_state.setdefault("quick_ct", 0)
 st.session_state.setdefault("quick_material", 0)
@@ -555,6 +651,7 @@ st.session_state.setdefault(
 )
 st.session_state.setdefault("show_rangeslider", True)
 st.session_state.setdefault("show_spikelines", True)
+scenario_store = st.session_state.setdefault("whatif_scenarios", {})
 
 with st.sidebar.expander("グラフ操作オプション", expanded=False):
     st.session_state["show_spikelines"] = st.checkbox(
@@ -726,7 +823,7 @@ with qcol4:
 qp = st.session_state["quick_price"]
 qc = st.session_state["quick_ct"]
 qm = st.session_state["quick_material"]
-active_label = _detect_simulation_label(qp, qc, qm)
+active_label = _resolve_scenario_label(qp, qc, qm, scenario_store)
 st.session_state["active_simulation"] = active_label
 preset_desc = SIMULATION_PRESETS.get(active_label, {}).get("description", "")
 summary_text = f"販売価格{qp:+d}%｜労働時間{qc:+d}%｜材料費{qm:+d}%"
@@ -736,50 +833,103 @@ else:
     detail = f"｜{preset_desc}" if preset_desc else ""
     st.caption(f"シミュレーション: {active_label}（{summary_text}）{detail}")
 
-df_base = df_view_filtered.copy()
-base_ach_rate = (df_base["meets_required_rate"].mean() * 100.0) if len(df_base) > 0 else 0.0
-base_avg_vapm = (
-    df_base["va_per_min"].replace([np.inf, -np.inf], np.nan).dropna().mean()
-    if "va_per_min" in df_base
-    else np.nan
-)
-df_sim = df_base.copy()
-if qp:
-    df_sim["actual_unit_price"] *= (1 + qp / 100.0)
-if qc:
-    df_sim["minutes_per_unit"] *= (1 + qc / 100.0)
-if qm:
-    df_sim["material_unit_cost"] *= (1 + qm / 100.0)
-df_sim["gp_per_unit"] = df_sim["actual_unit_price"] - df_sim["material_unit_cost"]
-df_sim["daily_total_minutes"] = df_sim["minutes_per_unit"] * df_sim["daily_qty"]
-df_sim["daily_va"] = df_sim["gp_per_unit"] * df_sim["daily_qty"]
-with np.errstate(divide="ignore", invalid="ignore"):
-    df_sim["va_per_min"] = df_sim["daily_va"] / df_sim["daily_total_minutes"]
-df_view = compute_results(df_sim, be_rate, req_rate, delta_low, delta_high)
-ach_rate = (df_view["meets_required_rate"].mean() * 100.0) if len(df_view) > 0 else 0.0
-avg_vapm = (
-    df_view["va_per_min"].replace([np.inf, -np.inf], np.nan).dropna().mean()
-    if "va_per_min" in df_view
-    else np.nan
-)
+feedback = st.session_state.pop("scenario_manager_feedback", None)
+if feedback:
+    level = feedback.get("type", "info") if isinstance(feedback, dict) else "info"
+    message = feedback.get("message", "") if isinstance(feedback, dict) else str(feedback)
+    notify = {"success": st.success, "warning": st.warning, "info": st.info}.get(level, st.info)
+    if message:
+        notify(message)
 
-avg_vapm = float(avg_vapm) if avg_vapm is not None else np.nan
-base_avg_vapm = float(base_avg_vapm) if base_avg_vapm is not None else np.nan
-if pd.isna(avg_vapm):
-    avg_vapm = np.nan
-if pd.isna(base_avg_vapm):
-    base_avg_vapm = np.nan
+with st.expander("💾 シナリオ管理", expanded=False):
+    st.caption("現在のクイック調整を名前を付けて保存し、後から呼び出して比較できます。")
+    saved_names = list(scenario_store.keys())
+    manage_cols = None
+    selected_saved: Optional[str] = None
+    if saved_names:
+        selected_saved = st.selectbox(
+            "保存済みシナリオ",
+            ["選択なし"] + saved_names,
+            key="scenario_manager_select",
+        )
+        manage_cols = st.columns(2)
+        if manage_cols[0].button("適用", key="scenario_manager_load"):
+            if selected_saved and selected_saved != "選択なし":
+                config = scenario_store.get(selected_saved, {})
+                st.session_state["quick_price"] = int(config.get("quick_price", 0))
+                st.session_state["quick_ct"] = int(config.get("quick_ct", 0))
+                st.session_state["quick_material"] = int(config.get("quick_material", 0))
+                st.session_state["scenario_manager_feedback"] = {
+                    "type": "success",
+                    "message": f"{selected_saved} を適用しました。",
+                }
+                st.rerun()
+        if manage_cols[1].button("削除", key="scenario_manager_delete"):
+            if selected_saved and selected_saved != "選択なし":
+                scenario_store.pop(selected_saved, None)
+                st.session_state["whatif_scenarios"] = scenario_store
+                st.session_state["scenario_manager_feedback"] = {
+                    "type": "info",
+                    "message": f"{selected_saved} を削除しました。",
+                }
+                st.rerun()
+    else:
+        st.caption("保存済みシナリオはまだありません。下で名前を入力して保存してください。")
 
-base_daily_va_total = (
-    float(np.nansum(pd.to_numeric(df_base["daily_va"], errors="coerce")))
-    if "daily_va" in df_base
-    else 0.0
+    new_name = st.text_input(
+        "シナリオ名",
+        key="scenario_save_name",
+        help="例: 施策A (価格+5%)、施策B (CT-10%) など",
+    )
+    if st.button("保存/上書き", key="scenario_manager_save"):
+        trimmed = new_name.strip()
+        if not trimmed:
+            st.warning("シナリオ名を入力してください。")
+        else:
+            scenario_store[trimmed] = {
+                "quick_price": int(qp),
+                "quick_ct": int(qc),
+                "quick_material": int(qm),
+            }
+            st.session_state["whatif_scenarios"] = scenario_store
+            st.session_state["scenario_manager_feedback"] = {
+                "type": "success",
+                "message": f"{trimmed} を保存しました。",
+            }
+    st.session_state["scenario_save_name"] = ""
+    st.rerun()
+
+scenario_template = df_view_filtered.copy()
+df_base, base_metrics = _simulate_scenario(
+    scenario_template,
+    price_pct=0,
+    ct_pct=0,
+    material_pct=0,
+    be_rate=be_rate,
+    req_rate=req_rate,
+    delta_low=delta_low,
+    delta_high=delta_high,
 )
-sim_daily_va_total = (
-    float(np.nansum(pd.to_numeric(df_view["daily_va"], errors="coerce")))
-    if "daily_va" in df_view
-    else 0.0
+base_metrics_clean = _sanitize_metrics(base_metrics)
+base_ach_rate = base_metrics_clean["ach_rate"]
+base_avg_vapm = base_metrics_clean["avg_vapm"]
+base_daily_va_total = base_metrics_clean["daily_va_total"]
+
+df_view, active_metrics = _simulate_scenario(
+    scenario_template,
+    price_pct=qp,
+    ct_pct=qc,
+    material_pct=qm,
+    be_rate=be_rate,
+    req_rate=req_rate,
+    delta_low=delta_low,
+    delta_high=delta_high,
 )
+active_metrics_clean = _sanitize_metrics(active_metrics)
+ach_rate = active_metrics_clean["ach_rate"]
+avg_vapm = active_metrics_clean["avg_vapm"]
+sim_daily_va_total = active_metrics_clean["daily_va_total"]
+
 daily_delta = sim_daily_va_total - base_daily_va_total
 ach_delta = ach_rate - base_ach_rate
 vapm_delta = (
@@ -788,6 +938,241 @@ vapm_delta = (
     else np.nan
 )
 working_days = float(base_params.get("working_days", DEFAULT_PARAMS["working_days"]))
+
+scenario_results: Dict[str, Dict[str, Any]] = {
+    "ベース": {
+        "df": df_base,
+        "metrics": base_metrics_clean,
+        "adjustments": {"quick_price": 0, "quick_ct": 0, "quick_material": 0},
+    }
+}
+
+for name, config in scenario_store.items():
+    saved_df, saved_metrics = _simulate_scenario(
+        scenario_template,
+        price_pct=config.get("quick_price", 0),
+        ct_pct=config.get("quick_ct", 0),
+        material_pct=config.get("quick_material", 0),
+        be_rate=be_rate,
+        req_rate=req_rate,
+        delta_low=delta_low,
+        delta_high=delta_high,
+    )
+    scenario_results[name] = {
+        "df": saved_df,
+        "metrics": _sanitize_metrics(saved_metrics),
+        "adjustments": {
+            "quick_price": int(config.get("quick_price", 0)),
+            "quick_ct": int(config.get("quick_ct", 0)),
+            "quick_material": int(config.get("quick_material", 0)),
+        },
+    }
+
+if active_label != "ベース":
+    scenario_results[active_label] = {
+        "df": df_view,
+        "metrics": active_metrics_clean,
+        "adjustments": {"quick_price": int(qp), "quick_ct": int(qc), "quick_material": int(qm)},
+    }
+
+option_candidates = ["ベース"] + list(scenario_store.keys())
+if active_label and active_label not in option_candidates:
+    option_candidates.append(active_label)
+scenario_options = list(dict.fromkeys(option_candidates))
+
+compare_key = "scenario_compare_selection"
+if compare_key in st.session_state:
+    current_selection = [
+        scen for scen in st.session_state.get(compare_key, []) if scen in scenario_options
+    ]
+    if not current_selection:
+        current_selection = scenario_options
+    if set(current_selection) != set(st.session_state.get(compare_key, [])):
+        st.session_state[compare_key] = current_selection
+else:
+    st.session_state[compare_key] = scenario_options
+
+selected_scenarios = st.multiselect(
+    "シナリオ選択",
+    scenario_options,
+    default=scenario_options,
+    key=compare_key,
+)
+
+st.markdown("#### 📁 シナリオ比較レポート")
+
+comparison_records: List[Dict[str, Any]] = []
+base_ach = base_metrics_clean["ach_rate"]
+base_avg = base_metrics_clean["avg_vapm"]
+base_daily = base_metrics_clean["daily_va_total"]
+
+def _delta_or_nan(current: float, base_value: float) -> float:
+    if np.isfinite(current) and np.isfinite(base_value):
+        return float(current) - float(base_value)
+    return float("nan")
+
+for scen_name in selected_scenarios:
+    scen_data = scenario_results.get(scen_name)
+    if not scen_data:
+        continue
+    metrics = scen_data.get("metrics", {})
+    adjustments = scen_data.get("adjustments", {})
+    ach_val = float(metrics.get("ach_rate", np.nan))
+    avg_val = float(metrics.get("avg_vapm", np.nan))
+    daily_val = float(metrics.get("daily_va_total", np.nan))
+    comparison_records.append(
+        {
+            "シナリオ": scen_name,
+            "調整サマリ": _format_adjustment_summary(adjustments),
+            "販売価格調整(%)": int(adjustments.get("quick_price", 0)),
+            "労働時間調整(%)": int(adjustments.get("quick_ct", 0)),
+            "材料費調整(%)": int(adjustments.get("quick_material", 0)),
+            "必要賃率達成率(%)": ach_val,
+            "達成率差分(pts)": 0.0
+            if scen_name == "ベース" and np.isfinite(base_ach)
+            else _delta_or_nan(ach_val, base_ach),
+            "平均VA/分(円)": avg_val,
+            "平均VA/分差分(円)": 0.0
+            if scen_name == "ベース" and np.isfinite(base_avg)
+            else _delta_or_nan(avg_val, base_avg),
+            "日次付加価値(円)": daily_val,
+            "日次付加価値差分(円)": 0.0
+            if scen_name == "ベース" and np.isfinite(base_daily)
+            else _delta_or_nan(daily_val, base_daily),
+        }
+    )
+
+if comparison_records:
+    comparison_df = pd.DataFrame(comparison_records)
+    styled = comparison_df.style.format(
+        {
+            "必要賃率達成率(%)": "{:.1f}",
+            "達成率差分(pts)": "{:+.1f}",
+            "平均VA/分(円)": "{:.2f}",
+            "平均VA/分差分(円)": "{:+.2f}",
+            "日次付加価値(円)": "{:,.0f}",
+            "日次付加価値差分(円)": "{:+,.0f}",
+        },
+        na_rep="-",
+    )
+    st.dataframe(styled, use_container_width=True)
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    excel_buffer = BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+        comparison_df.to_excel(writer, sheet_name="比較サマリ", index=False)
+        meta_df = pd.DataFrame(
+            {
+                "生成日時": [now_str],
+                "選択シナリオ": [", ".join(selected_scenarios)],
+                "基準シナリオ": ["ベース"],
+            }
+        )
+        meta_df.to_excel(writer, sheet_name="メタ情報", index=False)
+    excel_buffer.seek(0)
+
+    try:
+        pdfmetrics.getFont("HeiseiMin-W3")
+    except KeyError:
+        pdfmetrics.registerFont(UnicodeCIDFont("HeiseiMin-W3"))
+
+    def _fmt(value: float, fmt: str) -> str:
+        if value is None or not np.isfinite(value):
+            return "-"
+        return fmt.format(value)
+
+    pdf_buffer = BytesIO()
+    doc = SimpleDocTemplate(pdf_buffer, pagesize=A4, topMargin=36, bottomMargin=36)
+    styles = getSampleStyleSheet()
+    styles["Heading1"].fontName = "HeiseiMin-W3"
+    styles["Heading2"].fontName = "HeiseiMin-W3"
+    styles["Normal"].fontName = "HeiseiMin-W3"
+
+    story = [
+        Paragraph("シナリオ比較レポート", styles["Heading1"]),
+        Spacer(1, 12),
+        Paragraph(f"生成日時: {now_str}", styles["Normal"]),
+        Paragraph(f"基準シナリオ: ベース", styles["Normal"]),
+        Paragraph(f"比較対象: {', '.join(selected_scenarios)}", styles["Normal"]),
+        Spacer(1, 12),
+    ]
+
+    table_header = [
+        "シナリオ",
+        "調整サマリ",
+        "必要賃率達成率(%)",
+        "平均VA/分(円)",
+        "日次付加価値(円)",
+        "達成率差分(pts)",
+        "VA/分差分(円)",
+        "日次付加価値差分(円)",
+    ]
+    table_rows = [table_header]
+    for record in comparison_records:
+        table_rows.append(
+            [
+                record["シナリオ"],
+                record["調整サマリ"],
+                _fmt(record["必要賃率達成率(%)"], "{:.1f}"),
+                _fmt(record["平均VA/分(円)"], "{:.2f}"),
+                _fmt(record["日次付加価値(円)"], "{:,.0f}"),
+                _fmt(record["達成率差分(pts)"], "{:+.1f}"),
+                _fmt(record["平均VA/分差分(円)"], "{:+.2f}"),
+                _fmt(record["日次付加価値差分(円)"], "{:+,.0f}"),
+            ]
+        )
+
+    table = Table(table_rows, repeatRows=1)
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2F6776")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "HeiseiMin-W3"),
+                ("FONTNAME", (0, 1), (-1, -1), "HeiseiMin-W3"),
+                ("ALIGN", (2, 1), (-1, -1), "RIGHT"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.HexColor("#F4F7FA")]),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#D7E2EA")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ]
+        )
+    )
+    story.append(table)
+    story.append(Spacer(1, 12))
+
+    for record in comparison_records:
+        if record["シナリオ"] == "ベース":
+            continue
+        summary_line = (
+            f"{record['シナリオ']}: 達成率 {_fmt(record['達成率差分(pts)'], '{:+.1f}')}pt / "
+            f"平均VA {_fmt(record['平均VA/分差分(円)'], '{:+.2f}')}円 / "
+            f"日次VA {_fmt(record['日次付加価値差分(円)'], '{:+,.0f}')}円"
+        )
+        story.append(Paragraph(summary_line, styles["Normal"]))
+
+    doc.build(story)
+    pdf_buffer.seek(0)
+
+    download_cols = st.columns(2)
+    with download_cols[0]:
+        st.download_button(
+            "Excelエクスポート",
+            data=excel_buffer.getvalue(),
+            file_name="scenario_comparison.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    with download_cols[1]:
+        st.download_button(
+            "PDFエクスポート",
+            data=pdf_buffer.getvalue(),
+            file_name="scenario_comparison.pdf",
+            mime="application/pdf",
+        )
+else:
+    st.info("比較対象のシナリオを選択してください。")
 
 st.markdown("##### 📊 感度分析ハイライト")
 mcol1, mcol2, mcol3 = st.columns(3)
@@ -852,8 +1237,12 @@ with st.expander("📈 月次スナップショットを記録", expanded=False)
             st.warning("対象年月を正しく指定してください。")
         else:
             metrics_map = {
-                "ベース": (base_ach_rate, base_avg_vapm, df_base),
-                "施策A": (ach_rate, avg_vapm, df_view),
+                name: (
+                    data.get("metrics", {}).get("ach_rate", np.nan),
+                    data.get("metrics", {}).get("avg_vapm", np.nan),
+                    data.get("df", pd.DataFrame()),
+                )
+                for name, data in scenario_results.items()
             }
             ach_val, vapm_val, df_candidate = metrics_map.get(
                 scenario_for_snapshot,
@@ -1322,31 +1711,50 @@ with col5:
         unsafe_allow_html=True,
     )
 
-kpi_alias = st.session_state.get("active_simulation", "施策A")
-if kpi_alias == "ベース":
-    kpi_alias = "施策A"
-kpi_data = [
-    {"scenario": "ベース", "display": "ベース", "KPI": "必要賃率達成SKU比率", "value": base_ach_rate},
-    {"scenario": "ベース", "display": "ベース", "KPI": "平均 付加価値/分", "value": base_avg_vapm},
-    {"scenario": "施策A", "display": kpi_alias, "KPI": "必要賃率達成SKU比率", "value": ach_rate},
-    {"scenario": "施策A", "display": kpi_alias, "KPI": "平均 付加価値/分", "value": avg_vapm},
-]
-kpi_df = pd.DataFrame(kpi_data)
-kpi_df = kpi_df[kpi_df["scenario"].isin(selected_scenarios)]
-fig_kpi = px.bar(
-    kpi_df,
-    x="KPI",
-    y="value",
-    color="display",
-    barmode="group",
-    color_discrete_sequence=PASTEL_PALETTE,
-)
-fig_kpi.update_traces(opacity=0.85)
-fig_kpi.update_yaxes(gridcolor="#D7E2EA")
-fig_kpi.update_xaxes(gridcolor="#D7E2EA")
-fig_kpi.update_layout(legend_title_text="シナリオ")
-fig_kpi = _apply_plotly_theme(fig_kpi, legend_bottom=True)
-st.plotly_chart(fig_kpi, use_container_width=True, config=_build_plotly_config())
+kpi_records: List[Dict[str, Any]] = []
+for scen_name in selected_scenarios:
+    scen_data = scenario_results.get(scen_name)
+    if not scen_data:
+        continue
+    metrics = scen_data.get("metrics", {})
+    adjustments = scen_data.get("adjustments", {})
+    display_name = scen_name
+    if scen_name != "ベース":
+        display_name = f"{scen_name} ({_format_adjustment_summary(adjustments)})"
+    kpi_records.append(
+        {
+            "scenario": scen_name,
+            "display": display_name,
+            "KPI": "必要賃率達成SKU比率",
+            "value": metrics.get("ach_rate", np.nan),
+        }
+    )
+    kpi_records.append(
+        {
+            "scenario": scen_name,
+            "display": display_name,
+            "KPI": "平均 付加価値/分",
+            "value": metrics.get("avg_vapm", np.nan),
+        }
+    )
+kpi_df = pd.DataFrame(kpi_records)
+if kpi_df.empty:
+    st.info("比較対象のシナリオを選択してください。")
+else:
+    fig_kpi = px.bar(
+        kpi_df,
+        x="KPI",
+        y="value",
+        color="display",
+        barmode="group",
+        color_discrete_sequence=PASTEL_PALETTE,
+    )
+    fig_kpi.update_traces(opacity=0.85)
+    fig_kpi.update_yaxes(gridcolor="#D7E2EA")
+    fig_kpi.update_xaxes(gridcolor="#D7E2EA")
+    fig_kpi.update_layout(legend_title_text="シナリオ")
+    fig_kpi = _apply_plotly_theme(fig_kpi, legend_bottom=True)
+    st.plotly_chart(fig_kpi, use_container_width=True, config=_build_plotly_config())
 
 ai_insights = {
     "top_underperformers": top_list[
@@ -1841,40 +2249,51 @@ with tabs[0]:
     st.caption(
         "横軸=分/個（製造リードタイム）, 縦軸=付加価値/分。必要賃率×δ帯と損益分岐賃率を表示。"
     )
-    df_base["scenario"] = "ベース"
-    df_view["scenario"] = "施策A"
-    scatter_df = pd.concat([df_base, df_view], ignore_index=True)
-    scatter_df = scatter_df[scatter_df["scenario"].isin(selected_scenarios)].copy()
-    scatter_df["margin_to_req"] = req_rate - scatter_df["va_per_min"]
-    fig = px.scatter(
-        scatter_df,
-        x="minutes_per_unit",
-        y="va_per_min",
-        color="scenario",
-        hover_data={
-            "product_name": True,
-            "minutes_per_unit": ":.2f",
-            "va_per_min": ":.2f",
-            "margin_to_req": ":.2f",
-        },
-        opacity=0.8,
-        color_discrete_sequence=PASTEL_PALETTE,
-        height=420,
-    )
-    fig.update_traces(marker=dict(size=9, line=dict(color="#FFFFFF", width=0.6)))
-    fig.add_hrect(
-        y0=req_rate * delta_low,
-        y1=req_rate * delta_high,
-        line_width=0,
-        fillcolor="#9BC0A0",
-        opacity=0.15,
-    )
-    fig.add_hline(y=req_rate, line_color="#2F6776", line_width=2)
-    fig.add_hline(y=be_rate, line_color="#E7A07A", line_dash="dash")
-    fig.update_xaxes(title="分/個", gridcolor="#D7E2EA")
-    fig.update_yaxes(title="付加価値/分", gridcolor="#D7E2EA")
-    fig = _apply_plotly_theme(fig, show_spikelines=st.session_state["show_spikelines"])
-    st.plotly_chart(fig, use_container_width=True, config=_build_plotly_config())
+    scatter_frames: List[pd.DataFrame] = []
+    for scen_name in selected_scenarios:
+        scen_data = scenario_results.get(scen_name)
+        if not scen_data:
+            continue
+        scen_df = scen_data.get("df")
+        if scen_df is None or scen_df.empty:
+            continue
+        scen_copy = scen_df.copy()
+        scen_copy["scenario"] = scen_name
+        scatter_frames.append(scen_copy)
+    if not scatter_frames:
+        st.info("表示可能なシナリオがありません。")
+    else:
+        scatter_df = pd.concat(scatter_frames, ignore_index=True)
+        scatter_df["margin_to_req"] = req_rate - scatter_df["va_per_min"]
+        fig = px.scatter(
+            scatter_df,
+            x="minutes_per_unit",
+            y="va_per_min",
+            color="scenario",
+            hover_data={
+                "product_name": True,
+                "minutes_per_unit": ":.2f",
+                "va_per_min": ":.2f",
+                "margin_to_req": ":.2f",
+            },
+            opacity=0.8,
+            color_discrete_sequence=PASTEL_PALETTE,
+            height=420,
+        )
+        fig.update_traces(marker=dict(size=9, line=dict(color="#FFFFFF", width=0.6)))
+        fig.add_hrect(
+            y0=req_rate * delta_low,
+            y1=req_rate * delta_high,
+            line_width=0,
+            fillcolor="#9BC0A0",
+            opacity=0.15,
+        )
+        fig.add_hline(y=req_rate, line_color="#2F6776", line_width=2)
+        fig.add_hline(y=be_rate, line_color="#E7A07A", line_dash="dash")
+        fig.update_xaxes(title="分/個", gridcolor="#D7E2EA")
+        fig.update_yaxes(title="付加価値/分", gridcolor="#D7E2EA")
+        fig = _apply_plotly_theme(fig, show_spikelines=st.session_state["show_spikelines"])
+        st.plotly_chart(fig, use_container_width=True, config=_build_plotly_config())
 
 with tabs[1]:
     st.caption("月次・四半期のKPI推移を確認し、施策効果をトレースします。")
