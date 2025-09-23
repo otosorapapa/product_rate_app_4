@@ -14,19 +14,208 @@ from components import (
     render_sidebar_nav,
 )
 import os
+from textwrap import dedent
 from openai import OpenAI
 
 
-def _explain_standard_rate(results: dict[str, float]) -> str:
+def _explain_standard_rate(
+    params: dict[str, float], results: dict[str, float], detail: str
+) -> str:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return "OpenAI APIキーが設定されていません。"
-    client = OpenAI(api_key=api_key)
-    prompt = (
-        "以下の標準賃率計算結果を分かりやすく説明してください。"
-        "専門用語を避けて日本語で100字程度にまとめてください。\n"
-        + "\n".join(f"{k}: {v}" for k, v in results.items())
+
+    sanitized_params, _ = sanitize_params(params)
+
+    def _safe_pct(part: float, whole: float) -> float:
+        if whole <= 0:
+            return 0.0
+        return part / whole * 100
+
+    def _format_currency(value: float) -> str:
+        return f"{value:,.0f}"
+
+    def _format_rate(value: float) -> str:
+        return f"{value:.3f}"
+
+    def _format_delta(value: float) -> str:
+        return f"{value:+.3f}"
+
+    def _format_percent(value: float) -> str:
+        return f"{value:.1f}%"
+
+    def _format_minutes(value: float) -> str:
+        return f"{value:,.0f}"
+
+    fixed_total = results.get("fixed_total", 0.0)
+    required_profit_total = results.get("required_profit_total", 0.0)
+    break_even_rate = results.get("break_even_rate", 0.0)
+    required_rate = results.get("required_rate", 0.0)
+    annual_minutes = results.get("annual_minutes", 0.0)
+    minutes_per_day = results.get("minutes_per_day", 0.0)
+    standard_daily_minutes = results.get("standard_daily_minutes", 0.0)
+    net_workers = results.get("net_workers", 0.0)
+
+    labor_cost = sanitized_params.get("labor_cost", 0.0)
+    sga_cost = sanitized_params.get("sga_cost", 0.0)
+    loan_repayment = sanitized_params.get("loan_repayment", 0.0)
+    tax_payment = sanitized_params.get("tax_payment", 0.0)
+    future_business = sanitized_params.get("future_business", 0.0)
+    fulltime_workers = sanitized_params.get("fulltime_workers", 0.0)
+    part1_workers = sanitized_params.get("part1_workers", 0.0)
+    part2_workers = sanitized_params.get("part2_workers", 0.0)
+    part2_coefficient = sanitized_params.get("part2_coefficient", 0.0)
+    working_days = sanitized_params.get("working_days", 0.0)
+    daily_hours = sanitized_params.get("daily_hours", 0.0)
+    operation_rate = sanitized_params.get("operation_rate", 0.0)
+
+    labor_share_pct = _safe_pct(labor_cost, fixed_total)
+    sga_share_pct = _safe_pct(sga_cost, fixed_total)
+    loan_share_pct = _safe_pct(loan_repayment, required_profit_total)
+    tax_share_pct = _safe_pct(tax_payment, required_profit_total)
+    future_share_pct = _safe_pct(future_business, required_profit_total)
+
+    headcount_total = fulltime_workers + part1_workers + part2_workers
+    part_ratio_pct = _safe_pct(part1_workers + part2_workers, headcount_total)
+
+    scenario_data: list[dict[str, float | str]] = []
+
+    def register_scenario(title: str, narrative: str, mutate) -> None:
+        scenario_params = sanitized_params.copy()
+        mutate(scenario_params)
+        scenario_params, _ = sanitize_params(scenario_params)
+        _, scenario_results = compute_rates(scenario_params)
+        scenario_data.append(
+            {
+                "title": title,
+                "narrative": narrative,
+                "required_rate": scenario_results["required_rate"],
+                "delta_required_rate": scenario_results["required_rate"] - required_rate,
+                "break_even_rate": scenario_results["break_even_rate"],
+                "delta_break_even_rate": scenario_results["break_even_rate"] - break_even_rate,
+            }
+        )
+
+    if labor_cost > 0:
+        def _reduce_labor_cost(p: dict[str, float]) -> None:
+            p["labor_cost"] = max(p["labor_cost"] * 0.95, 0.0)
+
+        register_scenario(
+            "パート比率を高めて平均人件費を5%削減",
+            "正社員シフトの一部をパート化して労務費を抑える想定",
+            _reduce_labor_cost,
+        )
+
+    if sga_cost > 0:
+        def _trim_sga(p: dict[str, float]) -> None:
+            p["sga_cost"] = max(p["sga_cost"] * 0.95, 0.0)
+
+        register_scenario(
+            "共通管理費を5%削減",
+            "間接部門コストを見直して固定費を圧縮する想定",
+            _trim_sga,
+        )
+
+    op_increment = min(0.05, max(0.0, 1.0 - operation_rate))
+    if op_increment > 0:
+        def _raise_operation(p: dict[str, float], inc: float = op_increment) -> None:
+            p["operation_rate"] = min(p["operation_rate"] + inc, 1.0)
+
+        register_scenario(
+            f"段取り改善で操業度を{op_increment * 100:.1f}ポイント向上",
+            "ライン停止を減らして有効稼働率を高める想定",
+            _raise_operation,
+        )
+
+    coeff_increment = min(0.1, max(0.0, 1.0 - part2_coefficient))
+    if part2_workers > 0 and coeff_increment > 0:
+        def _raise_part2_coeff(p: dict[str, float], inc: float = coeff_increment) -> None:
+            p["part2_coefficient"] = min(p["part2_coefficient"] + inc, 1.0)
+
+        register_scenario(
+            f"準社員Bの稼働係数を{coeff_increment * 100:.1f}ポイント改善",
+            "柔軟シフトの調整で同じ人員の稼働効率を引き上げる想定",
+            _raise_part2_coeff,
+        )
+
+    base_info_lines = [
+        f"- 必要賃率: { _format_rate(required_rate) }円/分（時給換算 {required_rate * 60:,.1f}円）",
+        f"- 損益分岐賃率: { _format_rate(break_even_rate) }円/分（時給換算 {break_even_rate * 60:,.1f}円）",
+        f"- 年間標準稼働分: { _format_minutes(annual_minutes) }分",
+        f"- 固定費計: { _format_currency(fixed_total) }円",
+        f"- 必要利益計: { _format_currency(required_profit_total) }円",
+    ]
+
+    cost_lines = [
+        f"- 労務費: { _format_currency(labor_cost) }円（固定費の{ _format_percent(labor_share_pct) }）",
+        f"- 販管費: { _format_currency(sga_cost) }円（固定費の{ _format_percent(sga_share_pct) }）",
+    ]
+
+    profit_lines = [
+        f"- 借入返済: { _format_currency(loan_repayment) }円（必要利益の{ _format_percent(loan_share_pct) }）",
+        f"- 納税・納付: { _format_currency(tax_payment) }円（必要利益の{ _format_percent(tax_share_pct) }）",
+        f"- 未来事業費: { _format_currency(future_business) }円（必要利益の{ _format_percent(future_share_pct) }）",
+    ]
+
+    workforce_lines = [
+        f"- 正味直接工員数: {net_workers:.2f}人（正社員 {fulltime_workers:.2f}人、準社員A {part1_workers:.2f}人、準社員B {part2_workers:.2f}人、準社員B稼働係数 {part2_coefficient:.2f}）",
+        f"- パート比率: { _format_percent(part_ratio_pct) }（パート人員 {part1_workers + part2_workers:.2f}人 / 総人員 {headcount_total:.2f}人）",
+        f"- 年間稼働日数: {working_days:,.0f}日、1日稼働時間 {daily_hours:.2f}時間（1日稼働分 { _format_minutes(minutes_per_day) }分、標準稼働分 { _format_minutes(standard_daily_minutes) }分、操業度 { _format_percent(operation_rate * 100) }）",
+    ]
+
+    if scenario_data:
+        scenario_lines = []
+        for idx, sc in enumerate(scenario_data, 1):
+            scenario_lines.append(
+                f"{idx}. {sc['title']}（{sc['narrative']}）: 必要賃率 { _format_rate(sc['required_rate']) }円/分（基準比 { _format_delta(sc['delta_required_rate']) }円/分）、損益分岐賃率 { _format_rate(sc['break_even_rate']) }円/分（基準比 { _format_delta(sc['delta_break_even_rate']) }円/分）"
+            )
+        scenario_block = "\n".join(f"- {line}" for line in scenario_lines)
+    else:
+        scenario_block = "- 改善シミュレーションは生成できませんでした。"
+
+    detail_rules = {
+        "simple": "- 専門用語を控え、平易な日本語で要点と打ち手を説明してください。\n- 数値は丸めつつ単位を明示し、経営者がすぐ理解できる語り口にしてください。",
+        "detailed": "- 管理会計やCVP分析に関する用語を活用し、論理的な根拠を添えてください。\n- 数値根拠や比率を明示し、経営会議の議事メモ風にまとめてください。",
+    }
+    detail_key = detail if detail in detail_rules else "simple"
+    detail_label = {"simple": "簡易版", "detailed": "詳細版"}[detail_key]
+    style_rules = detail_rules[detail_key]
+
+    prompt = dedent(
+        f"""
+        あなたは製造業の管理会計に精通したアドバイザーです。以下の標準賃率の計算結果を読み取り、経営層が意思決定に使える解説と改善策を提示してください。
+
+        【前提（計算結果）】
+        {'\n'.join(base_info_lines)}
+        【コスト構成】
+        {'\n'.join(cost_lines)}
+        【利益確保の内訳】
+        {'\n'.join(profit_lines)}
+        【人員と稼働前提】
+        {'\n'.join(workforce_lines)}
+        【改善シミュレーション】
+        {scenario_block}
+
+        指示:
+        1. 計算結果から読み取れる現状の要点を2行程度でまとめてください。
+        2. 上記シミュレーションや比率を根拠に、経営者目線の具体的なアクションを最低2つ提示してください。各アクションでは必要賃率または損益分岐賃率が何円変化するかを明示してください。
+        3. 打ち手の優先度や期待効果にも触れてください。
+
+        粒度指定: {detail_label}
+        表現ルール:
+        {style_rules}
+
+        出力フォーマット:
+        【サマリー】
+        - ...
+        【推奨アクション】
+        1. ...
+        2. ...
+        """
     )
+
+    client = OpenAI(api_key=api_key)
+
     try:
         resp = client.responses.create(model="gpt-4o-mini", input=prompt)
         return resp.output_text.strip()
@@ -351,11 +540,35 @@ with c4:
     st.caption("稼働係数を考慮した実働ベースの生産要員数です。")
 
 st.subheader("AIによる説明")
-st.caption("計算結果を経営者目線の文章で要約します。専門用語が多いと感じたらこちらを活用してください。")
+st.caption("経営者が意思決定に使える観点で要約と改善提案を生成します。粒度を選んでからボタンを押してください。")
+
+explain_options = {
+    "簡易版（平易な表現）": "simple",
+    "詳細版（管理会計用語を活用）": "detailed",
+}
+selected_label = st.radio(
+    "解説の粒度",
+    list(explain_options.keys()),
+    index=0,
+    horizontal=True,
+    help="簡易版は平易な言葉で要点を説明し、詳細版は専門用語を交えて深掘りします。",
+)
+detail_key = explain_options[selected_label]
+
+if "sr_ai_comment" not in st.session_state:
+    st.session_state["sr_ai_comment"] = {}
+
 if st.button("結果をAIで説明"):
     with st.spinner("生成中..."):
-        st.session_state["sr_ai_comment"] = _explain_standard_rate(results)
-st.write(st.session_state.get("sr_ai_comment", ""))
+        st.session_state["sr_ai_comment"][detail_key] = _explain_standard_rate(
+            params, results, detail_key
+        )
+
+ai_comment = st.session_state["sr_ai_comment"].get(detail_key, "")
+if ai_comment:
+    st.markdown(ai_comment)
+else:
+    st.caption("※ボタンを押すと、選択した粒度でAI解説が表示されます。")
 
 _, wf_col = st.columns([3, 1])
 with wf_col:
