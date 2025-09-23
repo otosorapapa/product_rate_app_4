@@ -74,7 +74,7 @@ def test_validate_product_dataframe_detects_unit_mismatch():
     errors, warnings, detail = validate_product_dataframe(df)
     assert any("単位" in msg for msg in errors)
     target = detail[detail["項目"] == "販売単価（円/個）"].iloc[0]
-    assert "千円/個" in str(target["内容"]) or "千円/個" in str(target["入力値"])
+    assert "千円/個" in str(target["原因/状況"]) or "千円/個" in str(target["入力値"])
     assert "テンプレート" in str(target["対処方法"])
 
 
@@ -102,7 +102,7 @@ def test_validate_product_dataframe_warns_when_unit_missing():
     assert not errors
     assert any("リードタイム" in msg for msg in warnings)
     dataset_issue = detail[detail["項目"] == "リードタイム（分/個）"].iloc[0]
-    assert "未設定" in str(dataset_issue["内容"])
+    assert "未設定" in str(dataset_issue["原因/状況"])
     assert "分/個" in str(dataset_issue["対処方法"])
 
 
