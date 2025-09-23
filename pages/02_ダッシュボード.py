@@ -34,6 +34,7 @@ from components import (
     render_stepper,
     render_sidebar_nav,
 )
+from offline import restore_session_state_from_cache, sync_offline_cache
 import os
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -85,6 +86,8 @@ _PASTEL_THEME_CONFIG["config"]["legend"]["titleColor"] = _palette["text"]
 
 
 apply_user_theme()
+
+restore_session_state_from_cache()
 
 
 def _register_pastel_theme() -> None:
@@ -2508,3 +2511,5 @@ with tabs[5]:
         tooltip=["count()"]
     ).properties(height=420)
     st.altair_chart(hist, use_container_width=True)
+
+sync_offline_cache()

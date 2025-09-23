@@ -2,6 +2,8 @@ from typing import Any, Dict, List, Optional
 
 import streamlit as st
 
+from offline import render_offline_controls
+
 _DEFAULT_THEME_KEY = "標準（ブルー）"
 _DEFAULT_FONT_KEY = "ふつう"
 
@@ -341,6 +343,54 @@ def _build_theme_css(theme: Dict[str, str], font_scale: float) -> str:
         color: var(--app-accent);
         font-weight: 600;
     }}
+    @media (max-width: 1080px) {{
+        [data-testid="stSidebar"] {{
+            width: 280px;
+        }}
+        .stButton > button,
+        .stDownloadButton > button {{
+            width: 100%;
+        }}
+    }}
+    @media (max-width: 860px) {{
+        [data-testid="stAppViewContainer"] {{
+            padding-left: 0;
+            padding-right: 0;
+        }}
+        [data-testid="block-container"] {{
+            padding: 0.6rem 0.9rem 3rem;
+        }}
+        [data-testid="stHorizontalBlock"] {{
+            flex-wrap: wrap;
+            gap: 0.75rem;
+        }}
+        [data-testid="stHorizontalBlock"] > div {{
+            flex: 1 1 100% !important;
+            width: 100% !important;
+        }}
+        div[data-testid="column"] {{
+            flex: 1 1 100% !important;
+            width: 100% !important;
+        }}
+        [data-testid="stMetric"] {{
+            width: 100%;
+        }}
+        .stTabs [data-baseweb="tab-list"] {{
+            flex-wrap: wrap;
+        }}
+    }}
+    @media (max-width: 520px) {{
+        h1 {{
+            font-size: calc(var(--app-font-base) * 1.4);
+        }}
+        h2 {{
+            font-size: calc(var(--app-font-base) * 1.25);
+        }}
+        .stButton > button,
+        .stDownloadButton > button {{
+            padding: 0.55rem 1.0rem;
+        }}
+    }}
     </style>
     """
 
@@ -571,3 +621,6 @@ def render_sidebar_nav(*, page_key: Optional[str] = None) -> None:
     )
 
     st.sidebar.caption(_ONBOARDING_EFFECT)
+
+    st.sidebar.divider()
+    render_offline_controls()

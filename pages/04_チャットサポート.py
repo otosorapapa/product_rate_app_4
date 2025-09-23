@@ -16,6 +16,7 @@ from components import (
     render_page_tutorial,
     render_sidebar_nav,
 )
+from offline import restore_session_state_from_cache, sync_offline_cache
 from standard_rate_core import DEFAULT_PARAMS, compute_rates, sanitize_params
 from utils import (
     compute_results,
@@ -397,6 +398,8 @@ def _prepare_context() -> tuple[pd.DataFrame, Dict[str, float], str]:
 
 
 apply_user_theme()
+
+restore_session_state_from_cache()
 render_sidebar_nav(page_key="chat")
 st.title("④ チャットボット / FAQ")
 render_help_button("chat")
@@ -482,3 +485,5 @@ for message in history:
     content = message.get("content", "")
     with st.chat_message(role):
         st.markdown(content)
+
+sync_offline_cache()
