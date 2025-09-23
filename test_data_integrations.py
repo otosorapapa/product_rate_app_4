@@ -10,6 +10,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from data_integrations import (  # noqa: E402
     IntegrationConfig,
+    auto_sync_transactions,
     apply_transaction_summary_to_products,
     load_transactions_for_sync,
     summarize_transactions,
@@ -106,3 +107,28 @@ def test_load_transactions_for_sync_raises_when_columns_missing():
     config = IntegrationConfig(source_type="accounting", vendor="弥生会計")
     with pytest.raises(ValueError):
         load_transactions_for_sync(config, csv_file=csv_buffer)
+
+
+def test_auto_sync_transactions_merges_multiple_sources():
+    configs = [
+        IntegrationConfig(source_type="accounting", vendor="弥生会計"),
+        IntegrationConfig(source_type="accounting", vendor="MFクラウド会計"),
+        IntegrationConfig(source_type="pos", vendor="スマレジPOS"),
+    ]
+
+    result = auto_sync_transactions(
+        configs, start_date=date(2024, 1, 1), end_date=date(2024, 1, 2)
+    )
+
+    assert not result.transactions.empty
+    assert result.summary["product_no"].nunique() >= 1
+    assert result.transactions["date"].dt.date.min() >= date(2024, 1, 1)
+    assert result.transactions["date"].dt.date.max() <= date(2024, 1, 2)
+
+    vendors = set(result.transactions["source"].unique())
+    assert {"弥生会計", "MFクラウド会計", "スマレジPOS"}.intersection(vendors)
+
+    assert result.logs
+    for log in result.logs:
+        assert log["status"] in {"success", "empty", "error"}
+        assert "schedule" in log
