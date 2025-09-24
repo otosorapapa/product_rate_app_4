@@ -818,7 +818,10 @@ def _create_inventory_projection_df(inventory: pd.DataFrame, horizon_days: int =
 
     on_hand = float(inventory["on_hand"].sum())
     safety_stock = float(inventory["safety_stock"].sum())
-    daily_usage = float(inventory.get("daily_qty", 0).sum())
+    if "daily_qty" in inventory:
+        daily_usage = float(inventory["daily_qty"].sum())
+    else:
+        daily_usage = 0.0
     dates = pd.date_range(pd.Timestamp.today().normalize(), periods=horizon_days + 1, freq="D")
 
     records = []
