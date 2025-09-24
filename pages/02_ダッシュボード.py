@@ -110,6 +110,1119 @@ def _register_pastel_theme() -> None:
 
 _register_pastel_theme()
 
+STATUS_MESSAGES: Dict[str, Dict[str, Any]] = {
+    "no_data": {
+        "level": "warning",
+        "text": "該当期間のデータはありません。期間や店舗を変更して再度お試しください。",
+        "button": {"label": "別の期間を選ぶ", "action": "reset_period"},
+        "persist": True,
+    },
+    "loading": {
+        "level": "info",
+        "text": "データを読み込んでいます…",
+        "persist": True,
+    },
+    "error": {
+        "level": "error",
+        "text": "データ取得に失敗しました。数分後に再度お試しください。",
+        "button": {"label": "再読み込み", "action": "rerun"},
+        "persist": True,
+    },
+    "empty_filter": {
+        "level": "warning",
+        "text": "該当する項目がありません。フィルタ条件を緩めてください。",
+        "button": {"label": "フィルタをリセット", "action": "reset_filters"},
+        "persist": True,
+    },
+    "success_export": {
+        "level": "success",
+        "text": "ファイルをダウンロードしました。ご確認ください。",
+        "persist": False,
+    },
+}
+
+_STORE_NAME_MAP: Dict[str, str] = {
+    "Square POS": "本店",
+    "square": "本店",
+    "スマレジPOS": "2号店",
+    "smaregi": "2号店",
+    "freee会計": "オンライン",
+    "freee": "オンライン",
+    "MFクラウド会計": "オンライン",
+    "mf_cloud": "オンライン",
+    "弥生会計": "本店",
+    "yayoi": "本店",
+}
+
+_DEFAULT_STORE_OPTION = "全店舗"
+
+
+def _set_status(key: Optional[str]) -> None:
+    """Update the status flag in session state."""
+
+    if key:
+        st.session_state["status"] = key
+    else:
+        st.session_state.pop("status", None)
+
+
+def _handle_status_action(action: Optional[str], default_period: pd.Timestamp, default_store: str) -> None:
+    """Perform a follow-up action for status banner buttons."""
+
+    if not action:
+        _set_status(None)
+        return
+    if action == "reset_period":
+        st.session_state["selected_period"] = default_period
+        _set_status(None)
+    elif action == "reset_filters":
+        st.session_state["selected_store"] = default_store
+        st.session_state["inventory_filter_mode"] = "不足のみ"
+        _set_status(None)
+    elif action == "rerun":
+        _set_status(None)
+        st.experimental_rerun()
+    else:
+        _set_status(None)
+
+
+def _render_status_banner(default_period: pd.Timestamp, default_store: str) -> None:
+    """Display contextual status messages with optional follow-up actions."""
+
+    key = st.session_state.get("status")
+    if not key:
+        return
+    info = STATUS_MESSAGES.get(key)
+    if not info:
+        _set_status(None)
+        return
+
+    level = info.get("level", "info")
+    message = info.get("text", "")
+    action = info.get("button")
+
+    if level == "success":
+        st.toast(message or "完了しました。", icon="📁")
+        _set_status(None)
+        return
+
+    renderers = {
+        "info": st.info,
+        "warning": st.warning,
+        "error": st.error,
+    }
+    renderer = renderers.get(level, st.info)
+
+    renderer(message)
+    if action:
+        if st.button(action.get("label", "再試行"), key=f"status_action_{key}"):
+            _handle_status_action(action.get("action"), default_period, default_store)
+            return
+
+    if not info.get("persist", False):
+        _set_status(None)
+
+
+def _safe_to_numeric(series: pd.Series) -> pd.Series:
+    """Convert a Series to numeric values while filling NaNs with 0."""
+
+    converted = pd.to_numeric(series, errors="coerce")
+    return converted.fillna(0.0)
+
+
+def _infer_category_label(name: Any) -> str:
+    """Infer a coarse category label from the product name."""
+
+    if not isinstance(name, str) or not name:
+        return "その他"
+    name = name.strip()
+    if any(keyword in name for keyword in ["苺", "桃", "栗"]):
+        return "季節限定"
+    if "大福" in name or "饅頭" in name:
+        return "定番商品"
+    if "ギフト" in name or "詰め合わせ" in name:
+        return "ギフト"
+    return "その他"
+
+
+def _infer_channel_from_product(product_no: Any) -> str:
+    """Return a deterministic channel label from product numbers."""
+
+    try:
+        tail_digit = int(str(product_no)[-1])
+    except (TypeError, ValueError):
+        tail_digit = 0
+    return "EC" if tail_digit % 2 == 0 else "店舗"
+
+
+def _map_store_label(value: Any) -> str:
+    """Normalise various vendor/source labels to store-friendly names."""
+
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "本店"
+    text = str(value)
+    return _STORE_NAME_MAP.get(text, _STORE_NAME_MAP.get(text.lower(), "本店"))
+
+
+def _prepare_transactions_dataset(products: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """Return a harmonised transaction dataset used across behaviour tabs."""
+
+    raw = st.session_state.get("external_sync_last_transactions")
+    if isinstance(raw, pd.DataFrame) and not raw.empty:
+        tx = raw.copy()
+    else:
+        sample_path = Path(__file__).resolve().parents[1] / "data" / "external" / "pos_transactions_sample.csv"
+        tx = pd.read_csv(sample_path)
+
+    if "source" not in tx.columns:
+        tx["source"] = "Square POS"
+
+    tx["date"] = pd.to_datetime(tx.get("date"), errors="coerce")
+    tx = tx.dropna(subset=["date", "product_no"])
+    tx["product_no"] = tx["product_no"].astype(str)
+
+    for column in ("sales_amount", "material_cost", "sold_qty"):
+        if column in tx.columns:
+            tx[column] = _safe_to_numeric(tx[column])
+        else:
+            tx[column] = 0.0
+
+    tx["store"] = tx.get("store")
+    tx["store"] = tx["store"].where(tx["store"].notna(), tx["source"])
+    tx["store"] = tx["store"].map(_map_store_label)
+
+    product_info = pd.DataFrame()
+    if isinstance(products, pd.DataFrame) and not products.empty:
+        product_info = products.copy()
+        product_info["product_no"] = product_info["product_no"].astype(str)
+        if "category" not in product_info.columns:
+            product_info["category"] = product_info["product_name"].apply(_infer_category_label)
+        else:
+            product_info["category"] = product_info["category"].fillna(
+                product_info["product_name"].apply(_infer_category_label)
+            )
+        product_info = product_info[["product_no", "product_name", "category"]]
+
+    if not product_info.empty:
+        tx = tx.merge(product_info, on="product_no", how="left")
+    else:
+        tx["product_name"] = tx["product_no"]
+        tx["category"] = tx["product_name"].apply(_infer_category_label)
+
+    tx["channel"] = tx["product_no"].apply(_infer_channel_from_product)
+    tx["period"] = tx["date"].dt.to_period("M").dt.to_timestamp()
+    tx["gross_profit"] = tx["sales_amount"] - tx["material_cost"]
+    tx = tx.sort_values(["date", "product_no"]).reset_index(drop=True)
+    return tx
+
+
+def _prepare_inventory_snapshot(products: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """Synthesise an inventory table from uploaded product data."""
+
+    if not isinstance(products, pd.DataFrame) or products.empty:
+        return pd.DataFrame(
+            columns=[
+                "product_no",
+                "product_name",
+                "store",
+                "category",
+                "on_hand",
+                "safety_stock",
+                "shortage",
+                "coverage_days",
+                "reorder_link",
+            ]
+        )
+
+    inv = products.copy()
+    inv["product_no"] = inv["product_no"].astype(str)
+    if "category" not in inv.columns:
+        inv["category"] = inv["product_name"].apply(_infer_category_label)
+    else:
+        inv["category"] = inv["category"].fillna(inv["product_name"].apply(_infer_category_label))
+
+    inv["store"] = inv["product_no"].apply(lambda x: "本店" if int(str(x)[-1]) % 3 != 0 else "2号店")
+    inv["daily_qty"] = _safe_to_numeric(inv.get("daily_qty", 0))
+    inv["on_hand"] = (inv["daily_qty"] * 3).round().astype(int)
+    inv["safety_stock"] = (inv["daily_qty"] * 4).round().astype(int)
+    inv["shortage"] = inv["safety_stock"] - inv["on_hand"]
+    inv["coverage_days"] = np.where(
+        inv["daily_qty"] > 0,
+        (inv["on_hand"] / inv["daily_qty"]).round(1),
+        np.nan,
+    )
+    inv["reorder_link"] = inv.apply(
+        lambda row: (
+            "mailto:purchase@example.com"
+            + f"?subject={row['product_name']}の追加発注&body=不足数: {max(int(row['shortage']), 0)}個"
+        ),
+        axis=1,
+    )
+    columns = [
+        "product_no",
+        "product_name",
+        "store",
+        "category",
+        "on_hand",
+        "safety_stock",
+        "shortage",
+        "coverage_days",
+        "reorder_link",
+    ]
+    return inv[columns]
+
+
+def _prepare_cashflow_dataset(
+    transactions: pd.DataFrame, *, base_balance: float = 3_500_000.0
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Derive daily cash flow trends and transaction-level records."""
+
+    if transactions.empty:
+        empty = pd.DataFrame(
+            columns=["date", "store", "cash_in", "cash_out", "net", "balance"]
+        )
+        return empty, empty
+
+    daily = (
+        transactions.groupby(["date", "store"], as_index=False)
+        .agg(
+            cash_in=("sales_amount", "sum"),
+            material_out=("material_cost", "sum"),
+            gross_profit=("gross_profit", "sum"),
+        )
+        .sort_values("date")
+    )
+
+    daily["operating_out"] = (daily["cash_in"] * 0.18).round()
+    daily["cash_out"] = daily["material_out"] + daily["operating_out"]
+    daily["net"] = daily["cash_in"] - daily["cash_out"]
+    daily["balance"] = (
+        daily.groupby("store")["net"].cumsum() + base_balance
+    )
+
+    records: List[Dict[str, Any]] = []
+    for row in daily.itertuples():
+        records.append(
+            {
+                "date": row.date,
+                "store": row.store,
+                "type": "売上入金",
+                "direction": "入金",
+                "amount": float(row.cash_in),
+                "memo": f"{row.store}の売上入金",
+            }
+        )
+        records.append(
+            {
+                "date": row.date,
+                "store": row.store,
+                "type": "材料支払",
+                "direction": "出金",
+                "amount": float(row.material_out),
+                "memo": "仕入コストの支払",
+            }
+        )
+        records.append(
+            {
+                "date": row.date,
+                "store": row.store,
+                "type": "人件費",
+                "direction": "出金",
+                "amount": float(row.operating_out),
+                "memo": "スタッフ給与・諸経費",
+            }
+        )
+
+    cash_records = pd.DataFrame(records).sort_values("date")
+    return daily, cash_records
+
+
+def _prepare_behavior_context(products: Optional[pd.DataFrame]) -> Dict[str, Any]:
+    """Assemble shared data for the behaviour-first dashboard."""
+
+    transactions = _prepare_transactions_dataset(products)
+    monthly_summary = (
+        transactions.groupby(["period", "store"], as_index=False)
+        .agg(
+            total_sales=("sales_amount", "sum"),
+            total_gp=("gross_profit", "sum"),
+            total_qty=("sold_qty", "sum"),
+        )
+        .sort_values("period")
+    )
+    trend_all = (
+        monthly_summary.groupby("period", as_index=False)
+        .agg(
+            total_sales=("total_sales", "sum"),
+            total_gp=("total_gp", "sum"),
+        )
+        .sort_values("period")
+    )
+
+    inventory = _prepare_inventory_snapshot(products)
+    cash_daily, cash_records = _prepare_cashflow_dataset(transactions)
+
+    period_options = sorted(transactions["period"].dropna().unique())
+    if not period_options:
+        period_options = [pd.Timestamp(pd.Timestamp.today().to_period("M").to_timestamp())]
+    default_period = max(period_options)
+
+    store_options = sorted(transactions["store"].dropna().unique())
+    store_options = [_DEFAULT_STORE_OPTION] + store_options
+    default_store = _DEFAULT_STORE_OPTION
+
+    return {
+        "transactions": transactions,
+        "monthly_summary": monthly_summary,
+        "trend_all": trend_all,
+        "inventory": inventory,
+        "cash_daily": cash_daily,
+        "cash_records": cash_records,
+        "period_options": period_options,
+        "store_options": store_options,
+        "default_period": default_period,
+        "default_store": default_store,
+    }
+
+
+def _format_currency_short(value: Any) -> str:
+    """Return a compact currency representation with yen symbol."""
+
+    if value is None or pd.isna(value):
+        return "-"
+    return f"¥{float(value):,.0f}"
+
+
+def _format_ratio(value: Any) -> str:
+    """Format numeric ratio as percentage string."""
+
+    if value is None or pd.isna(value):
+        return "-"
+    return f"{float(value):.1f}%"
+
+
+def _build_pdf_from_dataframe(df: pd.DataFrame, title: str) -> bytes:
+    """Generate a simple PDF document from a dataframe."""
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4)
+    elements: List[Any] = []
+    styles = getSampleStyleSheet()
+    elements.append(Paragraph(title, styles["Heading3"]))
+    elements.append(Spacer(1, 12))
+    table_data = [list(df.columns)] + df.astype(str).values.tolist()
+    table = Table(table_data, repeatRows=1)
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8EEF7")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#1F2A44")),
+                ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7F9FC")]),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#D0D7E2")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ]
+        )
+    )
+    elements.append(table)
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer.read()
+
+
+def _filter_by_store(df: pd.DataFrame, store: str) -> pd.DataFrame:
+    """Return a filtered dataframe for the selected store option."""
+
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        if isinstance(df, pd.DataFrame):
+            return df.copy()
+        return pd.DataFrame()
+    if store == _DEFAULT_STORE_OPTION or "store" not in df.columns:
+        return df.copy()
+    return df[df["store"] == store].copy()
+
+
+def _compute_cash_balance(
+    cash_daily: pd.DataFrame, store: str, *, base_balance: float = 3_500_000.0
+) -> float:
+    """Compute the latest cash balance for the selected store."""
+
+    if cash_daily.empty:
+        return float("nan")
+    if store == _DEFAULT_STORE_OPTION:
+        aggregated = (
+            cash_daily.groupby("date", as_index=False)
+            .agg(net=("net", "sum"))
+            .sort_values("date")
+        )
+        aggregated["balance"] = base_balance + aggregated["net"].cumsum()
+        return float(aggregated["balance"].iloc[-1]) if not aggregated.empty else float("nan")
+
+    filtered = cash_daily[cash_daily["store"] == store].sort_values("date")
+    if filtered.empty:
+        return float("nan")
+    return float(filtered["balance"].iloc[-1])
+
+
+def _prepare_cash_chart(
+    cash_daily: pd.DataFrame, store: str, *, base_balance: float = 3_500_000.0
+) -> pd.DataFrame:
+    """Return a cashflow dataframe suitable for plotting."""
+
+    if cash_daily.empty:
+        return cash_daily
+    if store == _DEFAULT_STORE_OPTION:
+        aggregated = (
+            cash_daily.groupby("date", as_index=False)
+            .agg(
+                cash_in=("cash_in", "sum"),
+                cash_out=("cash_out", "sum"),
+                net=("net", "sum"),
+            )
+            .sort_values("date")
+        )
+        aggregated["balance"] = base_balance + aggregated["net"].cumsum()
+        aggregated["store"] = store
+        return aggregated
+    return cash_daily[cash_daily["store"] == store].sort_values("date")
+
+
+def _render_sales_tab(
+    context: Dict[str, Any],
+    *,
+    selected_period: pd.Timestamp,
+    previous_period: Optional[pd.Timestamp],
+    selected_store: str,
+    current_period_df: pd.DataFrame,
+    previous_period_df: pd.DataFrame,
+) -> None:
+    """Render the sales tab with metrics, trend and breakdown views."""
+
+    transactions = _filter_by_store(context["transactions"], selected_store)
+    if transactions.empty:
+        _set_status("no_data")
+        st.info("売上データがありません。先にデータを取り込み、再度ご確認ください。")
+        return
+
+    if current_period_df.empty:
+        _set_status("empty_filter")
+        st.warning("選択した期間・店舗に一致する売上データがありません。フィルタ条件を見直してください。")
+        return
+
+    if st.session_state.get("status") in {"no_data", "empty_filter"}:
+        _set_status(None)
+
+    period_label = _format_period_label(selected_period, "月次")
+    sales_now = float(current_period_df["sales_amount"].sum())
+    qty_now = float(current_period_df["sold_qty"].sum())
+    gp_now = float(current_period_df["gross_profit"].sum())
+
+    sales_prev = float(previous_period_df["sales_amount"].sum()) if not previous_period_df.empty else np.nan
+    sales_delta = _pct_change(sales_prev, sales_now)
+
+    avg_unit_price = sales_now / qty_now if qty_now else float("nan")
+    gp_ratio = (gp_now / sales_now * 100.0) if sales_now else float("nan")
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric(
+        "売上高",
+        _format_currency_short(sales_now),
+        delta=f"{sales_delta:+.1f}%" if not pd.isna(sales_delta) else "-",
+        help=f"{period_label}の売上合計。前月比を右側に表示します。",
+    )
+    col2.metric(
+        "平均客単価",
+        _format_currency_short(avg_unit_price),
+        help="売上高÷数量で算出。販売単価の傾向を把握できます。",
+    )
+    col3.metric(
+        "粗利率",
+        _format_ratio(gp_ratio),
+        help="売上高に対する粗利の割合。",
+    )
+
+    monthly_summary = context["monthly_summary"]
+    if selected_store == _DEFAULT_STORE_OPTION:
+        chart_df = (
+            monthly_summary.groupby("period", as_index=False)
+            .agg(
+                total_sales=("total_sales", "sum"),
+                total_gp=("total_gp", "sum"),
+            )
+            .sort_values("period")
+        )
+    else:
+        chart_df = monthly_summary[monthly_summary["store"] == selected_store]
+
+    if not chart_df.empty:
+        line_sales = (
+            alt.Chart(chart_df)
+            .mark_line(color=PASTEL_ACCENT, interpolate="monotone")
+            .encode(
+                x=alt.X("period:T", title="期間"),
+                y=alt.Y("total_sales:Q", title="売上高 (円)", axis=alt.Axis(format=",")),
+                tooltip=[
+                    alt.Tooltip("period:T", title="期間"),
+                    alt.Tooltip("total_sales:Q", title="売上", format=","),
+                    alt.Tooltip("total_gp:Q", title="粗利", format=","),
+                ],
+            )
+        )
+        line_gp = (
+            alt.Chart(chart_df)
+            .mark_line(color="#DDA0BC", strokeDash=[6, 4])
+            .encode(
+                x="period:T",
+                y=alt.Y("total_gp:Q", title="粗利 (円)", axis=alt.Axis(format=",")),
+            )
+        )
+        st.altair_chart(line_sales + line_gp, use_container_width=True)
+
+    tab_product, tab_channel = st.tabs(["商品別", "チャネル別"])
+
+    with tab_product:
+        product_summary = (
+            current_period_df.groupby("product_name", as_index=False)
+            .agg(
+                sales=("sales_amount", "sum"),
+                gp=("gross_profit", "sum"),
+                qty=("sold_qty", "sum"),
+            )
+            .sort_values("sales", ascending=False)
+        )
+        if product_summary.empty:
+            st.info("商品別の売上データがありません。")
+        else:
+            bar = (
+                alt.Chart(product_summary.head(15))
+                .mark_bar(color=PASTEL_ACCENT)
+                .encode(
+                    x=alt.X("sales:Q", title="売上 (円)", axis=alt.Axis(format=",")),
+                    y=alt.Y("product_name:N", title="商品", sort="-x"),
+                    tooltip=[
+                        alt.Tooltip("product_name:N", title="商品"),
+                        alt.Tooltip("sales:Q", title="売上", format=","),
+                        alt.Tooltip("gp:Q", title="粗利", format=","),
+                        alt.Tooltip("qty:Q", title="数量", format=","),
+                    ],
+                )
+            )
+            st.altair_chart(bar, use_container_width=True)
+            display = product_summary.rename(
+                columns={"product_name": "商品", "sales": "売上", "gp": "粗利", "qty": "数量"}
+            )
+            display["売上"] = display["売上"].map(_format_currency_short)
+            display["粗利"] = display["粗利"].map(_format_currency_short)
+            display["数量"] = display["数量"].map(lambda v: f"{float(v):,.0f}")
+            st.dataframe(display, use_container_width=True)
+
+    with tab_channel:
+        channel_summary = (
+            current_period_df.groupby("channel", as_index=False)
+            .agg(
+                sales=("sales_amount", "sum"),
+                gp=("gross_profit", "sum"),
+            )
+            .sort_values("sales", ascending=False)
+        )
+        if channel_summary.empty:
+            st.info("チャネル別の売上データがありません。")
+        else:
+            bar_channel = (
+                alt.Chart(channel_summary)
+                .mark_bar(color=PASTEL_ACCENT)
+                .encode(
+                    x=alt.X("channel:N", title="チャネル"),
+                    y=alt.Y("sales:Q", title="売上 (円)", axis=alt.Axis(format=",")),
+                    tooltip=[
+                        alt.Tooltip("channel:N", title="チャネル"),
+                        alt.Tooltip("sales:Q", title="売上", format=","),
+                        alt.Tooltip("gp:Q", title="粗利", format=","),
+                    ],
+                )
+            )
+            st.altair_chart(bar_channel, use_container_width=True)
+            display_ch = channel_summary.rename(columns={"channel": "チャネル", "sales": "売上", "gp": "粗利"})
+            display_ch["売上"] = display_ch["売上"].map(_format_currency_short)
+            display_ch["粗利"] = display_ch["粗利"].map(_format_currency_short)
+            st.dataframe(display_ch, use_container_width=True)
+
+    detail = current_period_df[
+        [
+            "date",
+            "product_no",
+            "product_name",
+            "category",
+            "channel",
+            "store",
+            "sold_qty",
+            "sales_amount",
+            "gross_profit",
+        ]
+    ].copy()
+    detail["date"] = detail["date"].dt.strftime("%Y-%m-%d")
+    detail = detail.rename(
+        columns={
+            "date": "日付",
+            "product_no": "製品番号",
+            "product_name": "製品名",
+            "category": "カテゴリ",
+            "channel": "チャネル",
+            "store": "店舗",
+            "sold_qty": "数量",
+            "sales_amount": "売上",
+            "gross_profit": "粗利",
+        }
+    )
+    if detail.empty:
+        st.caption("この期間の明細はありません。")
+    else:
+        st.dataframe(detail, use_container_width=True)
+        period_str = selected_period.strftime("%Y-%m")
+        store_label = selected_store if selected_store != _DEFAULT_STORE_OPTION else "全店舗"
+        csv_name = f"売上_{period_str}_{store_label}.csv"
+        pdf_name = f"売上_{period_str}_{store_label}.pdf"
+        csv_bytes = detail.to_csv(index=False).encode("utf-8-sig")
+        col_csv, col_pdf = st.columns(2)
+        if col_csv.download_button(
+            "CSVダウンロード",
+            data=csv_bytes,
+            file_name=csv_name,
+            mime="text/csv",
+        ):
+            _set_status("success_export")
+        if col_pdf.download_button(
+            "PDFダウンロード",
+            data=_build_pdf_from_dataframe(detail, title=f"{period_label} 売上明細 ({store_label})"),
+            file_name=pdf_name,
+            mime="application/pdf",
+        ):
+            _set_status("success_export")
+
+
+def _render_profit_tab(
+    context: Dict[str, Any],
+    *,
+    selected_period: pd.Timestamp,
+    previous_period: Optional[pd.Timestamp],
+    selected_store: str,
+    current_period_df: pd.DataFrame,
+    previous_period_df: pd.DataFrame,
+) -> None:
+    """Render the gross profit analysis tab."""
+
+    if current_period_df.empty:
+        st.info("粗利データがありません。売上タブのフィルタ条件をご確認ください。")
+        return
+
+    period_label = _format_period_label(selected_period, "月次")
+    gp_now = float(current_period_df["gross_profit"].sum())
+    gp_prev = float(previous_period_df["gross_profit"].sum()) if not previous_period_df.empty else np.nan
+    gp_delta = _pct_change(gp_prev, gp_now)
+
+    sales_now = float(current_period_df["sales_amount"].sum())
+    sales_prev = float(previous_period_df["sales_amount"].sum()) if not previous_period_df.empty else np.nan
+    margin_now = (gp_now / sales_now * 100.0) if sales_now else float("nan")
+    margin_prev = (gp_prev / sales_prev * 100.0) if sales_prev else np.nan
+    margin_delta = margin_now - margin_prev if not pd.isna(margin_now) and not pd.isna(margin_prev) else np.nan
+
+    cost_now = float(current_period_df["material_cost"].sum())
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric(
+        "粗利額",
+        _format_currency_short(gp_now),
+        delta=f"{gp_delta:+.1f}%" if not pd.isna(gp_delta) else "-",
+    )
+    col2.metric(
+        "粗利率",
+        _format_ratio(margin_now),
+        delta=f"{margin_delta:+.1f}pt" if not pd.isna(margin_delta) else "-",
+    )
+    col3.metric("材料費", _format_currency_short(cost_now))
+
+    tab_product, tab_channel = st.tabs(["商品別粗利", "チャネル別粗利"])
+
+    with tab_product:
+        product_gp = (
+            current_period_df.groupby("product_name", as_index=False)
+            .agg(
+                gp=("gross_profit", "sum"),
+                sales=("sales_amount", "sum"),
+            )
+            .sort_values("gp", ascending=False)
+        )
+        if product_gp.empty:
+            st.info("商品別粗利のデータがありません。")
+        else:
+            bar = (
+                alt.Chart(product_gp.head(15))
+                .mark_bar(color="#DDA0BC")
+                .encode(
+                    x=alt.X("gp:Q", title="粗利 (円)", axis=alt.Axis(format=",")),
+                    y=alt.Y("product_name:N", title="商品", sort="-x"),
+                    tooltip=[
+                        alt.Tooltip("product_name:N", title="商品"),
+                        alt.Tooltip("gp:Q", title="粗利", format=","),
+                        alt.Tooltip("sales:Q", title="売上", format=","),
+                    ],
+                )
+            )
+            st.altair_chart(bar, use_container_width=True)
+            display = product_gp.rename(columns={"product_name": "商品", "gp": "粗利", "sales": "売上"})
+            display["粗利"] = display["粗利"].map(_format_currency_short)
+            display["売上"] = display["売上"].map(_format_currency_short)
+            st.dataframe(display, use_container_width=True)
+
+    with tab_channel:
+        channel_gp = (
+            current_period_df.groupby("channel", as_index=False)
+            .agg(
+                gp=("gross_profit", "sum"),
+                sales=("sales_amount", "sum"),
+            )
+        )
+        if channel_gp.empty:
+            st.info("チャネル別の粗利データがありません。")
+        else:
+            bar = (
+                alt.Chart(channel_gp)
+                .mark_bar(color="#DDA0BC")
+                .encode(
+                    x=alt.X("channel:N", title="チャネル"),
+                    y=alt.Y("gp:Q", title="粗利 (円)", axis=alt.Axis(format=",")),
+                    tooltip=[
+                        alt.Tooltip("channel:N", title="チャネル"),
+                        alt.Tooltip("gp:Q", title="粗利", format=","),
+                        alt.Tooltip("sales:Q", title="売上", format=","),
+                    ],
+                )
+            )
+            st.altair_chart(bar, use_container_width=True)
+            display = channel_gp.rename(columns={"channel": "チャネル", "gp": "粗利", "sales": "売上"})
+            display["粗利"] = display["粗利"].map(_format_currency_short)
+            display["売上"] = display["売上"].map(_format_currency_short)
+            st.dataframe(display, use_container_width=True)
+
+    detail = current_period_df[
+        ["product_name", "category", "channel", "sold_qty", "sales_amount", "gross_profit"]
+    ].copy()
+    detail = detail.rename(
+        columns={
+            "product_name": "商品",
+            "category": "カテゴリ",
+            "channel": "チャネル",
+            "sold_qty": "数量",
+            "sales_amount": "売上",
+            "gross_profit": "粗利",
+        }
+    )
+    detail["売上"] = detail["売上"].map(_format_currency_short)
+    detail["粗利"] = detail["粗利"].map(_format_currency_short)
+    detail["数量"] = detail["数量"].map(lambda v: f"{float(v):,.0f}")
+    st.dataframe(detail, use_container_width=True)
+
+
+def _render_inventory_tab(
+    context: Dict[str, Any], *, selected_store: str, threshold_days: float, mode: str
+) -> None:
+    """Render the inventory tab with shortage highlights and table."""
+
+    inventory = _filter_by_store(context["inventory"], selected_store)
+    if inventory.empty:
+        st.info("在庫データがありません。製品マスタに安全在庫情報を追加してください。")
+        return
+
+    inventory = inventory.copy()
+    inventory["shortage_flag"] = (inventory["coverage_days"].fillna(0) < threshold_days) | (inventory["shortage"] > 0)
+    if mode == "不足のみ":
+        filtered = inventory[inventory["shortage_flag"]]
+    else:
+        filtered = inventory
+
+    shortage_count = int((inventory["shortage_flag"]).sum())
+    total_items = len(inventory)
+    col1, col2, col3 = st.columns(3)
+    col1.metric("不足SKU数", f"{shortage_count}/{total_items}")
+    avg_days = inventory["coverage_days"].replace([np.inf, -np.inf], np.nan).mean()
+    col2.metric("平均在庫日数", f"{avg_days:.1f}日" if not pd.isna(avg_days) else "-")
+    col3.metric(
+        "対象店舗",
+        selected_store if selected_store != _DEFAULT_STORE_OPTION else "全店舗",
+    )
+
+    if filtered.empty:
+        st.success("閾値未満の不足在庫はありません。")
+        return
+
+    top_shortages = filtered.sort_values("shortage", ascending=False).head(3)
+    for _, row in top_shortages.iterrows():
+        st.info(
+            f"{row['product_name']}｜残数 {int(row['on_hand'])}個｜安全在庫 {int(row['safety_stock'])}個"
+            f"｜不足 {int(max(row['shortage'], 0))}個"
+        )
+
+    table = filtered[[
+        "product_no",
+        "product_name",
+        "category",
+        "store",
+        "on_hand",
+        "safety_stock",
+        "shortage",
+        "coverage_days",
+        "reorder_link",
+    ]].rename(
+        columns={
+            "product_no": "製品番号",
+            "product_name": "製品名",
+            "category": "カテゴリ",
+            "store": "店舗",
+            "on_hand": "在庫数",
+            "safety_stock": "安全在庫",
+            "shortage": "不足数",
+            "coverage_days": "残日数",
+            "reorder_link": "発注",
+        }
+    )
+    table["不足数"] = table["不足数"].map(lambda v: int(max(v, 0)))
+    table["在庫数"] = table["在庫数"].astype(int)
+    table["安全在庫"] = table["安全在庫"].astype(int)
+    table["残日数"] = table["残日数"].map(lambda v: f"{float(v):.1f}" if not pd.isna(v) else "-")
+
+    column_config = {
+        "発注": st.column_config.LinkColumn("発注", help="在庫担当へのメールリンクを開きます。"),
+    }
+    st.data_editor(
+        table,
+        hide_index=True,
+        use_container_width=True,
+        column_config=column_config,
+    )
+
+    store_label = selected_store if selected_store != _DEFAULT_STORE_OPTION else "全店舗"
+    csv_name = f"在庫_{store_label}.csv"
+    pdf_name = f"在庫_{store_label}.pdf"
+    csv_bytes = table.to_csv(index=False).encode("utf-8-sig")
+    col_csv, col_pdf = st.columns(2)
+    if col_csv.download_button("CSVダウンロード", data=csv_bytes, file_name=csv_name, mime="text/csv"):
+        _set_status("success_export")
+    if col_pdf.download_button(
+        "PDFダウンロード",
+        data=_build_pdf_from_dataframe(table, title=f"在庫一覧 ({store_label})"),
+        file_name=pdf_name,
+        mime="application/pdf",
+    ):
+        _set_status("success_export")
+
+
+def _render_cash_tab(
+    context: Dict[str, Any],
+    *,
+    selected_period: pd.Timestamp,
+    selected_store: str,
+) -> None:
+    """Render the cash management view with balance and transaction table."""
+
+    cash_daily = context["cash_daily"]
+    cash_chart = _prepare_cash_chart(cash_daily, selected_store)
+    if cash_chart.empty:
+        st.info("キャッシュフローデータがありません。外部連携で入出金を同期してください。")
+        return
+
+    cash_balance = _compute_cash_balance(cash_daily, selected_store)
+    mask_period = cash_chart["date"].dt.to_period("M").dt.to_timestamp() == selected_period
+    net_period = cash_chart.loc[mask_period, "net"].sum()
+
+    col1, col2 = st.columns(2)
+    col1.metric(
+        "現預金残高",
+        _format_currency_short(cash_balance),
+        help="期間末時点の残高。複数店舗を集計する場合は全体のネットキャッシュを計算します。",
+    )
+    col2.metric(
+        "月次キャッシュフロー",
+        _format_currency_short(net_period),
+        help="選択期間の入金−出金。",
+    )
+
+    balance_chart = (
+        alt.Chart(cash_chart)
+        .mark_line(color=PASTEL_ACCENT)
+        .encode(
+            x=alt.X("date:T", title="日付"),
+            y=alt.Y("balance:Q", title="残高 (円)", axis=alt.Axis(format=",")),
+            tooltip=[
+                alt.Tooltip("date:T", title="日付"),
+                alt.Tooltip("balance:Q", title="残高", format=","),
+                alt.Tooltip("net:Q", title="当日ネット", format=","),
+            ],
+        )
+    )
+    bar_net = (
+        alt.Chart(cash_chart)
+        .mark_bar(opacity=0.4, color="#9BC0A0")
+        .encode(x="date:T", y=alt.Y("net:Q", title="当日ネット (円)", axis=alt.Axis(format=",")))
+    )
+    st.altair_chart(balance_chart + bar_net, use_container_width=True)
+
+    cash_records = _filter_by_store(context["cash_records"], selected_store)
+    mask_records = cash_records["date"].dt.to_period("M").dt.to_timestamp() == selected_period
+    cash_records = cash_records[mask_records]
+    if cash_records.empty:
+        st.caption("選択期間の入出金明細はありません。")
+        return
+
+    display = cash_records.copy()
+    display["date"] = display["date"].dt.strftime("%Y-%m-%d")
+    display = display.rename(
+        columns={
+            "date": "日付",
+            "store": "店舗",
+            "type": "区分",
+            "direction": "入出金",
+            "amount": "金額",
+            "memo": "メモ",
+        }
+    )
+    display["金額"] = display["金額"].map(_format_currency_short)
+    st.dataframe(display, use_container_width=True)
+
+    period_str = selected_period.strftime("%Y-%m")
+    store_label = selected_store if selected_store != _DEFAULT_STORE_OPTION else "全店舗"
+    csv_name = f"資金_{period_str}_{store_label}.csv"
+    pdf_name = f"資金_{period_str}_{store_label}.pdf"
+    csv_bytes = display.to_csv(index=False).encode("utf-8-sig")
+    col_csv, col_pdf = st.columns(2)
+    if col_csv.download_button("CSVダウンロード", data=csv_bytes, file_name=csv_name, mime="text/csv"):
+        _set_status("success_export")
+    if col_pdf.download_button(
+        "PDFダウンロード",
+        data=_build_pdf_from_dataframe(display, title=f"入出金明細 {period_str} ({store_label})"),
+        file_name=pdf_name,
+        mime="application/pdf",
+    ):
+        _set_status("success_export")
+
+
+def _render_behavior_dashboard(products: Optional[pd.DataFrame]) -> None:
+    """Render the behaviour-first dashboard view introduced in Step4."""
+
+    context = _prepare_behavior_context(products)
+    default_period: pd.Timestamp = context["default_period"]
+    default_store: str = context["default_store"]
+
+    st.session_state.setdefault("status", None)
+    st.session_state.setdefault("inventory_filter_mode", "不足のみ")
+    st.session_state.setdefault("inventory_threshold", 3.0)
+
+    if (
+        "selected_period" not in st.session_state
+        or st.session_state["selected_period"] not in context["period_options"]
+    ):
+        st.session_state["selected_period"] = default_period
+    if (
+        "selected_store" not in st.session_state
+        or st.session_state["selected_store"] not in context["store_options"]
+    ):
+        st.session_state["selected_store"] = default_store
+
+    _render_status_banner(default_period, default_store)
+
+    filter_container = st.container()
+    with filter_container:
+        col1, col2 = st.columns(2)
+        selected_period = col1.selectbox(
+            "期間",
+            options=context["period_options"],
+            format_func=lambda v: _format_period_label(v, "月次"),
+            key="selected_period",
+        )
+        selected_store = col2.selectbox(
+            "店舗",
+            options=context["store_options"],
+            key="selected_store",
+        )
+
+    period_options = context["period_options"]
+    try:
+        idx = period_options.index(selected_period)
+    except ValueError:
+        idx = len(period_options) - 1
+    previous_period = period_options[idx - 1] if idx > 0 else None
+
+    store_transactions = _filter_by_store(context["transactions"], selected_store)
+    current_period_df = (
+        store_transactions[store_transactions["period"] == selected_period]
+        if not store_transactions.empty
+        else pd.DataFrame(columns=store_transactions.columns)
+    )
+    if previous_period is not None and not store_transactions.empty:
+        previous_period_df = store_transactions[store_transactions["period"] == previous_period]
+    else:
+        previous_period_df = pd.DataFrame(columns=store_transactions.columns if not store_transactions.empty else [])
+
+    sales_now = float(current_period_df["sales_amount"].sum()) if not current_period_df.empty else 0.0
+    gp_now = float(current_period_df["gross_profit"].sum()) if not current_period_df.empty else 0.0
+    cash_balance = _compute_cash_balance(context["cash_daily"], selected_store)
+
+    kpi_col1, kpi_col2, kpi_col3 = st.columns(3)
+    kpi_col1.metric("売上高", _format_currency_short(sales_now))
+    kpi_col2.metric("粗利", _format_currency_short(gp_now))
+    kpi_col3.metric("現預金残高", _format_currency_short(cash_balance))
+
+    tabs = st.tabs(["売上", "在庫", "粗利", "資金"])
+    with tabs[0]:
+        _render_sales_tab(
+            context,
+            selected_period=selected_period,
+            previous_period=previous_period,
+            selected_store=selected_store,
+            current_period_df=current_period_df,
+            previous_period_df=previous_period_df,
+        )
+    with tabs[1]:
+        control_fn = getattr(st, "segmented_control", st.radio)
+        mode = control_fn(
+            "表示対象",
+            options=["不足のみ", "すべて"],
+            key="inventory_filter_mode",
+            help="不足しているSKUのみ、または全件表示を切り替えます。",
+        )
+        threshold = st.slider(
+            "安全在庫までの残日数",
+            min_value=1.0,
+            max_value=14.0,
+            value=float(st.session_state.get("inventory_threshold", 3.0)),
+            step=0.5,
+            key="inventory_threshold",
+        )
+        _render_inventory_tab(
+            context,
+            selected_store=selected_store,
+            threshold_days=threshold,
+            mode=mode,
+        )
+    with tabs[2]:
+        _render_profit_tab(
+            context,
+            selected_period=selected_period,
+            previous_period=previous_period,
+            selected_store=selected_store,
+            current_period_df=current_period_df,
+            previous_period_df=previous_period_df,
+        )
+    with tabs[3]:
+        _render_cash_tab(
+            context,
+            selected_period=selected_period,
+            selected_store=selected_store,
+        )
+
+
 METRIC_LABELS = {
     "actual_unit_price": "実際売単価",
     "material_unit_cost": "材料原価",
@@ -1118,6 +2231,30 @@ if "df_products_raw" not in st.session_state or st.session_state["df_products_ra
     st.stop()
 
 df_raw_all = st.session_state["df_products_raw"]
+
+view_options = ["行動設計ビュー", "詳細分析ビュー"]
+st.session_state.setdefault("dashboard_view_mode", view_options[0])
+segmented = getattr(st, "segmented_control", None)
+if callable(segmented):
+    selected_view = segmented(
+        "表示モード",
+        options=view_options,
+        key="dashboard_view_mode",
+        help="日次業務に最適化したビューと詳細分析ビューを切り替えます。",
+    )
+else:
+    selected_view = st.radio(
+        "表示モード",
+        options=view_options,
+        key="dashboard_view_mode",
+        horizontal=True,
+        help="日次業務に最適化したビューと詳細分析ビューを切り替えます。",
+    )
+
+if selected_view == "行動設計ビュー":
+    _render_behavior_dashboard(df_raw_all)
+    sync_offline_cache()
+    st.stop()
 st.session_state.setdefault("anomaly_review", {})
 excluded_skus = st.session_state.get("dq_exclude_skus", [])
 df_products_raw = df_raw_all[~df_raw_all["product_no"].isin(excluded_skus)].copy()
