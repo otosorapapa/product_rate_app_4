@@ -4794,7 +4794,19 @@ if len(top5) > 0:
         "execution_feasibility",
         "best_score",
     ]
-    table = top_list[columns].rename(columns=rename_map)
+    table = top_list[columns].copy().rename(columns=rename_map)
+    numeric_columns = [
+        "ギャップ(円/分)",
+        "不足額/月(円)",
+        "価格改善(円/個)",
+        "CT改善(分/個)",
+        "材料改善(円/個)",
+        "推定月次効果(円)",
+        "想定投資額(円)",
+        "想定ROI(月)",
+        "優先度スコア(1/月)",
+    ]
+    table[numeric_columns] = table[numeric_columns].apply(pd.to_numeric, errors="coerce")
     table.insert(0, "選択", False)
     column_config = {
         "選択": st.column_config.CheckboxColumn("選択", help="シナリオに転送するSKUを選択"),
