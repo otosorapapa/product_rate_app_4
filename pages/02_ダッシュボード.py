@@ -110,6 +110,10 @@ def _register_pastel_theme() -> None:
 
 _register_pastel_theme()
 
+COLOR_ACCENT = _palette["accent"]
+COLOR_ERROR = "#D94A64"
+COLOR_SECONDARY = _palette.get("border", "#9CA3AF")
+
 STATUS_MESSAGES: Dict[str, Dict[str, Any]] = {
     "no_data": {
         "level": "warning",
@@ -446,6 +450,7 @@ def _prepare_behavior_context(products: Optional[pd.DataFrame]) -> Dict[str, Any
         .agg(
             total_sales=("sales_amount", "sum"),
             total_gp=("gross_profit", "sum"),
+            total_cost=("material_cost", "sum"),
             total_qty=("sold_qty", "sum"),
         )
         .sort_values("period")
@@ -455,6 +460,7 @@ def _prepare_behavior_context(products: Optional[pd.DataFrame]) -> Dict[str, Any
         .agg(
             total_sales=("total_sales", "sum"),
             total_gp=("total_gp", "sum"),
+            total_cost=("total_cost", "sum"),
         )
         .sort_values("period")
     )
@@ -532,6 +538,547 @@ def _build_pdf_from_dataframe(df: pd.DataFrame, title: str) -> bytes:
     buffer.seek(0)
     return buffer.read()
 
+
+def _build_sales_trend_chart(chart_df: pd.DataFrame) -> alt.Chart:
+    """Return a line chart describing the sales trend over time."""
+
+    data = chart_df.copy()
+    if data.empty:
+        return alt.Chart(pd.DataFrame())
+
+    data["period"] = pd.to_datetime(data["period"])
+    latest = data["period"].max()
+    data["is_latest"] = data["period"] == latest
+
+    base = alt.Chart(data).encode(
+        x=alt.X(
+            "period:T",
+            title="月",
+            axis=alt.Axis(format="%Y-%m", labelAngle=-20),
+        )
+    )
+
+    line = base.mark_line(color=COLOR_ACCENT, interpolate="monotone", strokeWidth=3).encode(
+        y=alt.Y(
+            "total_sales:Q",
+            title="売上高 (円)",
+            axis=alt.Axis(format=","),
+            scale=alt.Scale(domainMin=0),
+        ),
+        tooltip=[
+            alt.Tooltip("period:T", title="月"),
+            alt.Tooltip("total_sales:Q", title="売上高", format=","),
+            alt.Tooltip("total_gp:Q", title="粗利", format=","),
+        ],
+    )
+
+    highlight = base.transform_filter(alt.datum.is_latest).mark_circle(size=80, color=COLOR_ACCENT).encode(
+        y="total_sales:Q"
+    )
+    label = (
+        base.transform_filter(alt.datum.is_latest)
+        .mark_text(color=COLOR_ACCENT, dx=8, dy=-8, fontWeight="bold")
+        .encode(text=alt.Text("total_sales:Q", format=","), y="total_sales:Q")
+    )
+
+    return line + highlight + label
+
+
+def _build_sales_by_product_chart(product_summary: pd.DataFrame) -> alt.Chart:
+    """Return a bar chart comparing sales by product."""
+
+    data = product_summary.head(10).copy()
+    if data.empty:
+        return alt.Chart(pd.DataFrame())
+
+    chart = (
+        alt.Chart(data)
+        .mark_bar(color=COLOR_ACCENT)
+        .encode(
+            x=alt.X(
+                "sales:Q",
+                title="売上高 (円)",
+                axis=alt.Axis(format=","),
+                scale=alt.Scale(domainMin=0),
+            ),
+            y=alt.Y("product_name:N", title="商品", sort="-x"),
+            tooltip=[
+                alt.Tooltip("product_name:N", title="商品"),
+                alt.Tooltip("sales:Q", title="売上高", format=","),
+                alt.Tooltip("gp:Q", title="粗利", format=","),
+                alt.Tooltip("qty:Q", title="数量", format=","),
+            ],
+        )
+    )
+    return chart.properties(height=max(220, 32 * len(data)))
+
+
+def _build_sales_by_channel_chart(channel_summary: pd.DataFrame) -> alt.Chart:
+    """Return a horizontal bar chart comparing sales by channel."""
+
+    data = channel_summary.copy()
+    if data.empty:
+        return alt.Chart(pd.DataFrame())
+
+    chart = (
+        alt.Chart(data)
+        .mark_bar(color=COLOR_ACCENT)
+        .encode(
+            x=alt.X(
+                "sales:Q",
+                title="売上高 (円)",
+                axis=alt.Axis(format=","),
+                scale=alt.Scale(domainMin=0),
+            ),
+            y=alt.Y("channel:N", title="チャネル", sort="-x"),
+            tooltip=[
+                alt.Tooltip("channel:N", title="チャネル"),
+                alt.Tooltip("sales:Q", title="売上高", format=","),
+                alt.Tooltip("gp:Q", title="粗利", format=","),
+            ],
+        )
+    )
+    return chart.properties(height=max(180, 34 * len(data)))
+
+
+def _build_sales_by_store_chart(store_summary: pd.DataFrame, avg_sales: float) -> alt.Chart:
+    """Return a vertical bar chart with an average reference line for store comparison."""
+
+    data = store_summary.copy()
+    if data.empty:
+        return alt.Chart(pd.DataFrame())
+
+    bars = (
+        alt.Chart(data)
+        .mark_bar(color=COLOR_ACCENT)
+        .encode(
+            x=alt.X("store:N", title="店舗"),
+            y=alt.Y(
+                "sales:Q",
+                title="売上高 (円)",
+                axis=alt.Axis(format=","),
+                scale=alt.Scale(domainMin=0),
+            ),
+            tooltip=[
+                alt.Tooltip("store:N", title="店舗"),
+                alt.Tooltip("sales:Q", title="売上高", format=","),
+            ],
+        )
+    )
+
+    reference = alt.Chart(pd.DataFrame({"avg": [avg_sales]})).mark_rule(
+        color=COLOR_SECONDARY,
+        strokeDash=[6, 4],
+        size=2,
+    ).encode(y="avg:Q")
+
+    return bars + reference
+
+
+def _build_gross_profit_trend_chart(trend_df: pd.DataFrame) -> alt.Chart:
+    """Return an area chart illustrating sales vs cost and the resulting gross profit."""
+
+    data = trend_df.copy()
+    if data.empty:
+        return alt.Chart(pd.DataFrame())
+
+    data["period"] = pd.to_datetime(data["period"])
+    rename_map = {"total_sales": "売上高", "total_cost": "原価", "total_gp": "粗利"}
+    long_df = data.melt("period", value_vars=list(rename_map.keys()), var_name="metric", value_name="amount")
+    long_df["metric_jp"] = long_df["metric"].map(rename_map)
+    long_df["is_latest"] = long_df.groupby("metric_jp")["period"].transform(lambda x: x == x.max())
+
+    color_scale = alt.Scale(
+        domain=["売上高", "原価", "粗利"],
+        range=[COLOR_ACCENT, COLOR_ERROR, COLOR_SECONDARY],
+    )
+
+    base = alt.Chart(long_df).encode(
+        x=alt.X("period:T", title="月", axis=alt.Axis(format="%Y-%m", labelAngle=-20)),
+        y=alt.Y(
+            "amount:Q",
+            title="金額 (円)",
+            axis=alt.Axis(format=","),
+            scale=alt.Scale(domainMin=0),
+        ),
+        color=alt.Color("metric_jp:N", title="指標", scale=color_scale),
+        tooltip=[
+            alt.Tooltip("period:T", title="月"),
+            alt.Tooltip("metric_jp:N", title="指標"),
+            alt.Tooltip("amount:Q", title="金額", format=","),
+        ],
+    )
+
+    area = base.transform_filter(alt.datum.metric_jp != "粗利").mark_area(opacity=0.45).encode(
+        order=alt.Order("metric_jp", sort="descending"),
+        y=alt.Y(
+            "amount:Q",
+            title="金額 (円)",
+            axis=alt.Axis(format=","),
+            scale=alt.Scale(domainMin=0),
+            stack=None,
+        ),
+    )
+
+    line = base.transform_filter(alt.datum.metric_jp == "粗利").mark_line(
+        strokeWidth=3,
+        strokeDash=[6, 3],
+    )
+
+    point = (
+        base.transform_filter((alt.datum.metric_jp == "粗利") & alt.datum.is_latest)
+        .mark_circle(size=80, color=COLOR_SECONDARY)
+    )
+    label = (
+        base.transform_filter((alt.datum.metric_jp == "粗利") & alt.datum.is_latest)
+        .mark_text(color=COLOR_SECONDARY, dx=8, dy=-8, fontWeight="bold")
+        .encode(text=alt.Text("amount:Q", format=","))
+    )
+
+    return area + line + point + label
+
+
+def _build_product_profit_chart(product_gp: pd.DataFrame) -> alt.Chart:
+    """Return a gradient bar chart for product-level gross profit."""
+
+    data = product_gp.head(15).copy()
+    if data.empty:
+        return alt.Chart(pd.DataFrame())
+
+    data["margin_rate"] = np.where(data["sales"] > 0, data["gp"] / data["sales"] * 100.0, np.nan)
+
+    chart = (
+        alt.Chart(data)
+        .mark_bar()
+        .encode(
+            x=alt.X(
+                "gp:Q",
+                title="粗利額 (円)",
+                axis=alt.Axis(format=","),
+                scale=alt.Scale(domainMin=0),
+            ),
+            y=alt.Y("product_name:N", title="商品", sort="-x"),
+            color=alt.Color(
+                "margin_rate:Q",
+                title="粗利率 (%)",
+                scale=alt.Scale(scheme="reds"),
+            ),
+            tooltip=[
+                alt.Tooltip("product_name:N", title="商品"),
+                alt.Tooltip("gp:Q", title="粗利額", format=","),
+                alt.Tooltip("sales:Q", title="売上高", format=","),
+                alt.Tooltip("margin_rate:Q", title="粗利率", format=".1f"),
+            ],
+        )
+    )
+    return chart.properties(height=max(220, 32 * len(data)))
+
+
+def _build_channel_profit_chart(channel_gp: pd.DataFrame) -> alt.Chart:
+    """Return a horizontal bar chart of gross profit by channel."""
+
+    data = channel_gp.copy()
+    if data.empty:
+        return alt.Chart(pd.DataFrame())
+
+    data["margin_rate"] = np.where(data["sales"] > 0, data["gp"] / data["sales"] * 100.0, np.nan)
+
+    chart = (
+        alt.Chart(data)
+        .mark_bar()
+        .encode(
+            x=alt.X(
+                "gp:Q",
+                title="粗利額 (円)",
+                axis=alt.Axis(format=","),
+                scale=alt.Scale(domainMin=0),
+            ),
+            y=alt.Y("channel:N", title="チャネル", sort="-x"),
+            color=alt.Color(
+                "margin_rate:Q",
+                title="粗利率 (%)",
+                scale=alt.Scale(scheme="blues"),
+            ),
+            tooltip=[
+                alt.Tooltip("channel:N", title="チャネル"),
+                alt.Tooltip("gp:Q", title="粗利額", format=","),
+                alt.Tooltip("sales:Q", title="売上高", format=","),
+                alt.Tooltip("margin_rate:Q", title="粗利率", format=".1f"),
+            ],
+        )
+    )
+    return chart.properties(height=max(200, 36 * len(data)))
+
+
+def _create_inventory_projection_df(inventory: pd.DataFrame, horizon_days: int = 14) -> pd.DataFrame:
+    """Return a projected inventory balance dataframe based on current stock and daily usage."""
+
+    if inventory.empty:
+        return pd.DataFrame(columns=["date", "projected_stock", "safety_stock"])
+
+    on_hand = float(inventory["on_hand"].sum())
+    safety_stock = float(inventory["safety_stock"].sum())
+    daily_usage = float(inventory.get("daily_qty", 0).sum())
+    dates = pd.date_range(pd.Timestamp.today().normalize(), periods=horizon_days + 1, freq="D")
+
+    records = []
+    for idx, dt_value in enumerate(dates):
+        projected = on_hand - daily_usage * idx
+        records.append(
+            {
+                "date": dt_value,
+                "projected_stock": max(projected, 0.0),
+                "safety_stock": safety_stock,
+            }
+        )
+    return pd.DataFrame(records)
+
+
+def _build_inventory_projection_chart(projection_df: pd.DataFrame) -> alt.Chart:
+    """Return a line chart for projected inventory versus safety stock."""
+
+    data = projection_df.copy()
+    if data.empty:
+        return alt.Chart(pd.DataFrame())
+
+    line = (
+        alt.Chart(data)
+        .mark_line(color=COLOR_ACCENT, strokeWidth=3)
+        .encode(
+            x=alt.X("date:T", title="日付"),
+            y=alt.Y(
+                "projected_stock:Q",
+                title="在庫残数 (個)",
+                axis=alt.Axis(format=","),
+                scale=alt.Scale(domainMin=0),
+            ),
+            tooltip=[
+                alt.Tooltip("date:T", title="日付"),
+                alt.Tooltip("projected_stock:Q", title="残数", format=","),
+            ],
+        )
+    )
+
+    area = (
+        alt.Chart(data)
+        .mark_area(color=COLOR_ACCENT, opacity=0.15)
+        .encode(x="date:T", y="projected_stock:Q")
+    )
+    safety = (
+        alt.Chart(data)
+        .mark_rule(color=COLOR_SECONDARY, strokeDash=[6, 4])
+        .encode(y="safety_stock:Q")
+    )
+    return area + line + safety
+
+
+def _build_inventory_category_chart(category_summary: pd.DataFrame) -> alt.Chart:
+    """Return a horizontal bar chart with color-coded stock status by category."""
+
+    data = category_summary.copy()
+    if data.empty:
+        return alt.Chart(pd.DataFrame())
+
+    status_order = ["不足", "適正", "過剰"]
+    color_scale = alt.Scale(
+        domain=status_order,
+        range=[COLOR_ERROR, COLOR_ACCENT, "#9BC0A0"],
+    )
+
+    chart = (
+        alt.Chart(data)
+        .mark_bar()
+        .encode(
+            x=alt.X(
+                "on_hand:Q",
+                title="在庫数 (個)",
+                axis=alt.Axis(format=","),
+                scale=alt.Scale(domainMin=0),
+            ),
+            y=alt.Y("category:N", title="カテゴリ", sort="-x"),
+            color=alt.Color("status:N", title="在庫状況", scale=color_scale),
+            tooltip=[
+                alt.Tooltip("category:N", title="カテゴリ"),
+                alt.Tooltip("on_hand:Q", title="在庫数", format=","),
+                alt.Tooltip("status:N", title="状況"),
+            ],
+        )
+    )
+    return chart.properties(height=max(200, 34 * len(data)))
+
+
+def _compute_inventory_turnover(
+    transactions: pd.DataFrame, inventory: pd.DataFrame, store: str
+) -> pd.DataFrame:
+    """Calculate monthly inventory turnover using material cost and current stock value."""
+
+    tx = _filter_by_store(transactions, store)
+    if tx.empty or inventory.empty:
+        return pd.DataFrame(columns=["period", "turnover"])
+
+    cost_per_unit = (
+        tx.groupby("product_no", as_index=False)
+        .agg(cost=("material_cost", "sum"), qty=("sold_qty", "sum"))
+        .assign(unit_cost=lambda df: np.where(df["qty"] > 0, df["cost"] / df["qty"], np.nan))
+    )
+    overall_unit_cost = cost_per_unit["unit_cost"].replace(0, np.nan).mean()
+    if pd.isna(overall_unit_cost):
+        overall_unit_cost = float(tx["material_cost"].sum() / max(tx["sold_qty"].sum(), 1))
+
+    inv = inventory.merge(cost_per_unit[["product_no", "unit_cost"]], on="product_no", how="left")
+    inv["unit_cost"] = inv["unit_cost"].fillna(overall_unit_cost)
+    inventory_value = float((inv["on_hand"] * inv["unit_cost"]).sum())
+    if inventory_value <= 0:
+        return pd.DataFrame(columns=["period", "turnover"])
+
+    monthly = (
+        tx.groupby(tx["date"].dt.to_period("M"))
+        .agg(material_cost=("material_cost", "sum"))
+        .reset_index()
+    )
+    monthly["period"] = monthly["date"].dt.to_timestamp()
+    monthly["turnover"] = monthly["material_cost"] / inventory_value
+    return monthly[["period", "turnover"]].sort_values("period")
+
+
+def _build_inventory_turnover_chart(turnover_df: pd.DataFrame, target: float = 4.0) -> alt.Chart:
+    """Return a line chart of inventory turnover with a target line."""
+
+    data = turnover_df.copy()
+    if data.empty:
+        return alt.Chart(pd.DataFrame())
+
+    data["is_latest"] = data["period"] == data["period"].max()
+
+    line = (
+        alt.Chart(data)
+        .mark_line(color=COLOR_ACCENT, strokeWidth=3)
+        .encode(
+            x=alt.X("period:T", title="月", axis=alt.Axis(format="%Y-%m", labelAngle=-20)),
+            y=alt.Y(
+                "turnover:Q",
+                title="在庫回転率 (回/月)",
+                axis=alt.Axis(format=".1f"),
+                scale=alt.Scale(domainMin=0),
+            ),
+            tooltip=[
+                alt.Tooltip("period:T", title="月"),
+                alt.Tooltip("turnover:Q", title="回転率", format=".2f"),
+            ],
+        )
+    )
+
+    points = line.transform_filter(alt.datum.is_latest).mark_circle(size=80)
+    target_line = alt.Chart(pd.DataFrame({"target": [target]})).mark_rule(
+        color=COLOR_SECONDARY,
+        strokeDash=[4, 4],
+    ).encode(y="target:Q")
+
+    return line + points + target_line
+
+
+def _build_cash_balance_chart(cash_chart: pd.DataFrame) -> alt.Chart:
+    """Return a line chart for cash balance with daily net bars."""
+
+    data = cash_chart.copy()
+    if data.empty:
+        return alt.Chart(pd.DataFrame())
+
+    balance_line = (
+        alt.Chart(data)
+        .mark_line(color=COLOR_ACCENT, strokeWidth=3)
+        .encode(
+            x=alt.X("date:T", title="日付"),
+            y=alt.Y(
+                "balance:Q",
+                title="残高 (円)",
+                axis=alt.Axis(format=","),
+                scale=alt.Scale(domainMin=0),
+            ),
+            tooltip=[
+                alt.Tooltip("date:T", title="日付"),
+                alt.Tooltip("balance:Q", title="残高", format=","),
+            ],
+        )
+    )
+
+    net_bar = (
+        alt.Chart(data)
+        .mark_bar(color="#9BC0A0", opacity=0.4)
+        .encode(
+            x="date:T",
+            y=alt.Y("net:Q", title="日次ネット (円)", axis=alt.Axis(format=",")),
+            tooltip=[
+                alt.Tooltip("date:T", title="日付"),
+                alt.Tooltip("net:Q", title="日次ネット", format=","),
+            ],
+        )
+    )
+
+    return balance_line + net_bar
+
+
+def _build_cash_flow_bars(monthly_flow: pd.DataFrame) -> alt.Chart:
+    """Return a grouped bar chart for monthly cash-in versus cash-out."""
+
+    data = monthly_flow.copy()
+    if data.empty:
+        return alt.Chart(pd.DataFrame())
+
+    long_df = data.melt("month", value_vars=["cash_in", "cash_out"], var_name="type", value_name="amount")
+    color_scale = alt.Scale(domain=["cash_in", "cash_out"], range=[COLOR_ACCENT, COLOR_ERROR])
+
+    chart = (
+        alt.Chart(long_df)
+        .mark_bar()
+        .encode(
+            x=alt.X("month:T", title="月", axis=alt.Axis(format="%Y-%m")),
+            y=alt.Y(
+                "amount:Q",
+                title="金額 (円)",
+                axis=alt.Axis(format=","),
+                scale=alt.Scale(domainMin=0),
+            ),
+            color=alt.Color("type:N", title="区分", scale=color_scale, legend=alt.Legend(orient="top")),
+            tooltip=[
+                alt.Tooltip("month:T", title="月"),
+                alt.Tooltip("type:N", title="区分"),
+                alt.Tooltip("amount:Q", title="金額", format=","),
+            ],
+        )
+    )
+    return chart
+
+
+def _build_cash_composition_chart(composition: pd.DataFrame) -> alt.Chart:
+    """Return a bar chart showing inflow/outflow composition by type."""
+
+    data = composition.copy()
+    if data.empty:
+        return alt.Chart(pd.DataFrame())
+
+    color_scale = alt.Scale(domain=["入金", "出金"], range=[COLOR_ACCENT, COLOR_ERROR])
+
+    chart = (
+        alt.Chart(data)
+        .mark_bar()
+        .encode(
+            x=alt.X("type:N", title="区分", sort="-y"),
+            y=alt.Y(
+                "amount:Q",
+                title="金額 (円)",
+                axis=alt.Axis(format=","),
+                scale=alt.Scale(domainMin=0),
+            ),
+            color=alt.Color("direction:N", title="入出金", scale=color_scale),
+            tooltip=[
+                alt.Tooltip("type:N", title="区分"),
+                alt.Tooltip("direction:N", title="入出金"),
+                alt.Tooltip("amount:Q", title="金額", format=","),
+            ],
+        )
+    )
+    return chart
 
 def _filter_by_store(df: pd.DataFrame, store: str) -> pd.DataFrame:
     """Return a filtered dataframe for the selected store option."""
@@ -651,6 +1198,7 @@ def _render_sales_tab(
             .agg(
                 total_sales=("total_sales", "sum"),
                 total_gp=("total_gp", "sum"),
+                total_cost=("total_cost", "sum"),
             )
             .sort_values("period")
         )
@@ -658,28 +1206,24 @@ def _render_sales_tab(
         chart_df = monthly_summary[monthly_summary["store"] == selected_store]
 
     if not chart_df.empty:
-        line_sales = (
-            alt.Chart(chart_df)
-            .mark_line(color=PASTEL_ACCENT, interpolate="monotone")
-            .encode(
-                x=alt.X("period:T", title="期間"),
-                y=alt.Y("total_sales:Q", title="売上高 (円)", axis=alt.Axis(format=",")),
-                tooltip=[
-                    alt.Tooltip("period:T", title="期間"),
-                    alt.Tooltip("total_sales:Q", title="売上", format=","),
-                    alt.Tooltip("total_gp:Q", title="粗利", format=","),
-                ],
-            )
+        st.altair_chart(_build_sales_trend_chart(chart_df), use_container_width=True)
+
+        weekly_summary = (
+            current_period_df.set_index("date")["sales_amount"].resample("W-MON").sum().reset_index()
+            if not current_period_df.empty
+            else pd.DataFrame(columns=["date", "sales_amount"])
         )
-        line_gp = (
-            alt.Chart(chart_df)
-            .mark_line(color="#DDA0BC", strokeDash=[6, 4])
-            .encode(
-                x="period:T",
-                y=alt.Y("total_gp:Q", title="粗利 (円)", axis=alt.Axis(format=",")),
+        if not weekly_summary.empty:
+            peak_idx = weekly_summary["sales_amount"].idxmax()
+            peak_week = weekly_summary.loc[peak_idx, "date"]
+            peak_value = weekly_summary.loc[peak_idx, "sales_amount"]
+            week_no = int(((peak_week.day - 1) // 7) + 1)
+            st.caption(
+                f"今月の売上は{_format_currency_short(sales_now)}で、前月比 {sales_delta:+.1f}% の伸び。"
+                f"週次では第{week_no}週が{_format_currency_short(peak_value)}でピークとなり、施策効果が確認できます。"
+                if not pd.isna(sales_delta)
+                else f"今月の売上は{_format_currency_short(sales_now)}。週次では第{week_no}週が{_format_currency_short(peak_value)}で最大です。"
             )
-        )
-        st.altair_chart(line_sales + line_gp, use_container_width=True)
 
     tab_product, tab_channel = st.tabs(["商品別", "チャネル別"])
 
@@ -696,21 +1240,19 @@ def _render_sales_tab(
         if product_summary.empty:
             st.info("商品別の売上データがありません。")
         else:
-            bar = (
-                alt.Chart(product_summary.head(15))
-                .mark_bar(color=PASTEL_ACCENT)
-                .encode(
-                    x=alt.X("sales:Q", title="売上 (円)", axis=alt.Axis(format=",")),
-                    y=alt.Y("product_name:N", title="商品", sort="-x"),
-                    tooltip=[
-                        alt.Tooltip("product_name:N", title="商品"),
-                        alt.Tooltip("sales:Q", title="売上", format=","),
-                        alt.Tooltip("gp:Q", title="粗利", format=","),
-                        alt.Tooltip("qty:Q", title="数量", format=","),
-                    ],
-                )
+            st.altair_chart(
+                _build_sales_by_product_chart(product_summary),
+                use_container_width=True,
             )
-            st.altair_chart(bar, use_container_width=True)
+            top3_share = (
+                product_summary.head(3)["sales"].sum() / sales_now
+                if sales_now
+                else np.nan
+            )
+            if not pd.isna(top3_share):
+                st.caption(
+                    f"上位3商品で総売上の{top3_share * 100:.1f}%を占めています。重点SKUの在庫と販促を優先的に確認しましょう。"
+                )
             display = product_summary.rename(
                 columns={"product_name": "商品", "sales": "売上", "gp": "粗利", "qty": "数量"}
             )
@@ -731,24 +1273,34 @@ def _render_sales_tab(
         if channel_summary.empty:
             st.info("チャネル別の売上データがありません。")
         else:
-            bar_channel = (
-                alt.Chart(channel_summary)
-                .mark_bar(color=PASTEL_ACCENT)
-                .encode(
-                    x=alt.X("channel:N", title="チャネル"),
-                    y=alt.Y("sales:Q", title="売上 (円)", axis=alt.Axis(format=",")),
-                    tooltip=[
-                        alt.Tooltip("channel:N", title="チャネル"),
-                        alt.Tooltip("sales:Q", title="売上", format=","),
-                        alt.Tooltip("gp:Q", title="粗利", format=","),
-                    ],
-                )
+            st.altair_chart(
+                _build_sales_by_channel_chart(channel_summary),
+                use_container_width=True,
             )
-            st.altair_chart(bar_channel, use_container_width=True)
+            lead_channel = channel_summary.iloc[0]
+            share = lead_channel["sales"] / sales_now if sales_now else np.nan
+            if not pd.isna(share):
+                st.caption(
+                    f"{lead_channel['channel']}チャネルが構成比{share * 100:.1f}%で最大です。構成比維持と他チャネルの底上げを検討しましょう。"
+                )
             display_ch = channel_summary.rename(columns={"channel": "チャネル", "sales": "売上", "gp": "粗利"})
             display_ch["売上"] = display_ch["売上"].map(_format_currency_short)
             display_ch["粗利"] = display_ch["粗利"].map(_format_currency_short)
             st.dataframe(display_ch, use_container_width=True)
+
+    store_summary = (
+        current_period_df.groupby("store", as_index=False)["sales_amount"].sum().rename(columns={"sales_amount": "sales"})
+    )
+    if len(store_summary) > 1:
+        avg_sales = store_summary["sales"].mean()
+        st.markdown("#### 店舗別売上")
+        st.altair_chart(
+            _build_sales_by_store_chart(store_summary, avg_sales),
+            use_container_width=True,
+        )
+        st.caption(
+            f"平均売上 {_format_currency_short(avg_sales)} を灰色線で表示。未達の店舗は販促や在庫補充を重点化しましょう。"
+        )
 
     detail = current_period_df[
         [
@@ -844,6 +1396,30 @@ def _render_profit_tab(
     )
     col3.metric("材料費", _format_currency_short(cost_now))
 
+    monthly_summary = context["monthly_summary"]
+    if selected_store == _DEFAULT_STORE_OPTION:
+        gp_trend_df = (
+            monthly_summary.groupby("period", as_index=False)
+            .agg(
+                total_sales=("total_sales", "sum"),
+                total_gp=("total_gp", "sum"),
+                total_cost=("total_cost", "sum"),
+            )
+            .sort_values("period")
+        )
+    else:
+        gp_trend_df = monthly_summary[monthly_summary["store"] == selected_store]
+
+    if not gp_trend_df.empty:
+        st.altair_chart(_build_gross_profit_trend_chart(gp_trend_df), use_container_width=True)
+        growth_text = f"前月比 {gp_delta:+.1f}%" if not pd.isna(gp_delta) else "前月比データなし"
+        margin_text = (
+            f"粗利率は {margin_now:.1f}%" if not pd.isna(margin_now) else "粗利率データなし"
+        )
+        st.caption(
+            f"粗利額は{_format_currency_short(gp_now)}で{growth_text}。{margin_text}の水準で推移しており、原価線との乖離で季節要因を把握できます。"
+        )
+
     tab_product, tab_channel = st.tabs(["商品別粗利", "チャネル別粗利"])
 
     with tab_product:
@@ -858,20 +1434,13 @@ def _render_profit_tab(
         if product_gp.empty:
             st.info("商品別粗利のデータがありません。")
         else:
-            bar = (
-                alt.Chart(product_gp.head(15))
-                .mark_bar(color="#DDA0BC")
-                .encode(
-                    x=alt.X("gp:Q", title="粗利 (円)", axis=alt.Axis(format=",")),
-                    y=alt.Y("product_name:N", title="商品", sort="-x"),
-                    tooltip=[
-                        alt.Tooltip("product_name:N", title="商品"),
-                        alt.Tooltip("gp:Q", title="粗利", format=","),
-                        alt.Tooltip("sales:Q", title="売上", format=","),
-                    ],
-                )
+            st.altair_chart(_build_product_profit_chart(product_gp), use_container_width=True)
+            top_item = product_gp.iloc[0]
+            top_margin = (top_item["gp"] / top_item["sales"] * 100.0) if top_item["sales"] else float("nan")
+            top_margin_text = _format_ratio(top_margin)
+            st.caption(
+                f"{top_item['product_name']}が粗利額{_format_currency_short(top_item['gp'])}、粗利率{top_margin_text}で最も貢献しています。高粗利商品の販売機会を逃さないようフォローしましょう。"
             )
-            st.altair_chart(bar, use_container_width=True)
             display = product_gp.rename(columns={"product_name": "商品", "gp": "粗利", "sales": "売上"})
             display["粗利"] = display["粗利"].map(_format_currency_short)
             display["売上"] = display["売上"].map(_format_currency_short)
@@ -888,20 +1457,17 @@ def _render_profit_tab(
         if channel_gp.empty:
             st.info("チャネル別の粗利データがありません。")
         else:
-            bar = (
-                alt.Chart(channel_gp)
-                .mark_bar(color="#DDA0BC")
-                .encode(
-                    x=alt.X("channel:N", title="チャネル"),
-                    y=alt.Y("gp:Q", title="粗利 (円)", axis=alt.Axis(format=",")),
-                    tooltip=[
-                        alt.Tooltip("channel:N", title="チャネル"),
-                        alt.Tooltip("gp:Q", title="粗利", format=","),
-                        alt.Tooltip("sales:Q", title="売上", format=","),
-                    ],
-                )
+            st.altair_chart(_build_channel_profit_chart(channel_gp), use_container_width=True)
+            lead_channel = channel_gp.sort_values("gp", ascending=False).iloc[0]
+            lead_margin = (
+                lead_channel["gp"] / lead_channel["sales"] * 100.0
+                if lead_channel["sales"]
+                else float("nan")
             )
-            st.altair_chart(bar, use_container_width=True)
+            lead_margin_text = _format_ratio(lead_margin)
+            st.caption(
+                f"{lead_channel['channel']}チャネルが粗利{_format_currency_short(lead_channel['gp'])}、粗利率{lead_margin_text}でトップ。構成比が低いチャネルの改善余地も併せて検討しましょう。"
+            )
             display = channel_gp.rename(columns={"channel": "チャネル", "gp": "粗利", "sales": "売上"})
             display["粗利"] = display["粗利"].map(_format_currency_short)
             display["売上"] = display["売上"].map(_format_currency_short)
@@ -953,6 +1519,45 @@ def _render_inventory_tab(
         "対象店舗",
         selected_store if selected_store != _DEFAULT_STORE_OPTION else "全店舗",
     )
+
+    projection_df = _create_inventory_projection_df(inventory)
+    if not projection_df.empty:
+        st.altair_chart(_build_inventory_projection_chart(projection_df), use_container_width=True)
+        below = projection_df[projection_df["projected_stock"] < projection_df["safety_stock"]]
+        if not below.empty:
+            alert_day = below.iloc[0]["date"].strftime("%m/%d")
+            st.caption(
+                f"{alert_day}に安全在庫を下回る見込みです。リードタイムを考慮した前倒し補充を検討しましょう。"
+            )
+        else:
+            st.caption("予測期間内は安全在庫を上回っています。販売増加時は補充リードタイムに注意してください。")
+
+    category_summary = (
+        inventory.groupby("category", as_index=False)
+        .agg(on_hand=("on_hand", "sum"), safety=("safety_stock", "sum"))
+        .assign(
+            status=lambda df: np.select(
+                [df["on_hand"] < df["safety"], df["on_hand"] > df["safety"] * 1.3],
+                ["不足", "過剰"],
+                default="適正",
+            )
+        )
+        .sort_values("on_hand", ascending=False)
+    )
+    if not category_summary.empty:
+        st.altair_chart(_build_inventory_category_chart(category_summary), use_container_width=True)
+        lead_category = category_summary.iloc[0]
+        st.caption(
+            f"{lead_category['category']}カテゴリの在庫が{int(lead_category['on_hand']):,}個で最大です。状況は{lead_category['status']}のため補充・削減計画を確認してください。"
+        )
+
+    turnover_df = _compute_inventory_turnover(context["transactions"], inventory, selected_store)
+    if not turnover_df.empty:
+        st.altair_chart(_build_inventory_turnover_chart(turnover_df), use_container_width=True)
+        latest_turnover = float(turnover_df.iloc[-1]["turnover"])
+        st.caption(
+            f"直近の在庫回転率は{latest_turnover:.2f}回/月。目標4.0回との差を確認し、滞留在庫の圧縮や販売強化の必要性を議論しましょう。"
+        )
 
     if filtered.empty:
         st.success("閾値未満の不足在庫はありません。")
@@ -1049,25 +1654,29 @@ def _render_cash_tab(
         help="選択期間の入金−出金。",
     )
 
-    balance_chart = (
-        alt.Chart(cash_chart)
-        .mark_line(color=PASTEL_ACCENT)
-        .encode(
-            x=alt.X("date:T", title="日付"),
-            y=alt.Y("balance:Q", title="残高 (円)", axis=alt.Axis(format=",")),
-            tooltip=[
-                alt.Tooltip("date:T", title="日付"),
-                alt.Tooltip("balance:Q", title="残高", format=","),
-                alt.Tooltip("net:Q", title="当日ネット", format=","),
-            ],
+    st.altair_chart(_build_cash_balance_chart(cash_chart), use_container_width=True)
+    trend_text = (
+        f"月次ネットは{_format_currency_short(net_period)}で、"
+        if not pd.isna(net_period)
+        else ""
+    )
+    st.caption(
+        f"現預金残高は{_format_currency_short(cash_balance)}まで積み上がっています。{trend_text}資金ショートリスクの有無を日次で確認できます。"
+    )
+
+    monthly_flow = (
+        cash_chart.assign(month=cash_chart["date"].dt.to_period("M").dt.to_timestamp())
+        .groupby("month", as_index=False)
+        .agg(cash_in=("cash_in", "sum"), cash_out=("cash_out", "sum"))
+        .sort_values("month")
+    )
+    if not monthly_flow.empty:
+        st.altair_chart(_build_cash_flow_bars(monthly_flow), use_container_width=True)
+        latest_row = monthly_flow[monthly_flow["month"] == monthly_flow["month"].max()].iloc[0]
+        balance_msg = latest_row["cash_in"] - latest_row["cash_out"]
+        st.caption(
+            f"直近月は入金{_format_currency_short(latest_row['cash_in'])}、出金{_format_currency_short(latest_row['cash_out'])}でネット{_format_currency_short(balance_msg)}でした。入出金のバランスを維持できているか確認しましょう。"
         )
-    )
-    bar_net = (
-        alt.Chart(cash_chart)
-        .mark_bar(opacity=0.4, color="#9BC0A0")
-        .encode(x="date:T", y=alt.Y("net:Q", title="当日ネット (円)", axis=alt.Axis(format=",")))
-    )
-    st.altair_chart(balance_chart + bar_net, use_container_width=True)
 
     cash_records = _filter_by_store(context["cash_records"], selected_store)
     mask_records = cash_records["date"].dt.to_period("M").dt.to_timestamp() == selected_period
@@ -1075,6 +1684,16 @@ def _render_cash_tab(
     if cash_records.empty:
         st.caption("選択期間の入出金明細はありません。")
         return
+
+    composition = (
+        cash_records.groupby(["type", "direction"], as_index=False)["amount"].sum().sort_values("amount", ascending=False)
+    )
+    if not composition.empty:
+        st.altair_chart(_build_cash_composition_chart(composition), use_container_width=True)
+        major_row = composition.iloc[0]
+        st.caption(
+            f"{major_row['type']}が{major_row['direction']}の中心で{_format_currency_short(major_row['amount'])}。費目別の構成比から削減余地や追加投資の判断材料を得られます。"
+        )
 
     display = cash_records.copy()
     display["date"] = display["date"].dt.strftime("%Y-%m-%d")
