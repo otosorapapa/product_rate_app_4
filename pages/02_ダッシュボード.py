@@ -1119,6 +1119,38 @@ def _compute_cash_balance(
     return float(filtered["balance"].iloc[-1])
 
 
+def _compute_cash_balance_for_period(
+    cash_daily: pd.DataFrame,
+    store: str,
+    period: Optional[pd.Timestamp],
+    *,
+    base_balance: float = 3_500_000.0,
+) -> float:
+    """Return the month-end cash balance for a given period and store."""
+
+    if cash_daily.empty or period is None:
+        return float("nan")
+
+    if store == _DEFAULT_STORE_OPTION:
+        data = (
+            cash_daily.groupby("date", as_index=False)
+            .agg(net=("net", "sum"))
+            .sort_values("date")
+        )
+        data["balance"] = base_balance + data["net"].cumsum()
+    else:
+        data = cash_daily[cash_daily["store"] == store].sort_values("date")
+
+    if data.empty:
+        return float("nan")
+
+    period_end = pd.Timestamp(period).to_period("M").to_timestamp() + pd.offsets.MonthEnd(0)
+    subset = data[data["date"] <= period_end]
+    if subset.empty:
+        return float("nan")
+    return float(subset["balance"].iloc[-1])
+
+
 def _prepare_cash_chart(
     cash_daily: pd.DataFrame, store: str, *, base_balance: float = 3_500_000.0
 ) -> pd.DataFrame:
@@ -1261,10 +1293,17 @@ def _render_sales_tab(
             display = product_summary.rename(
                 columns={"product_name": "商品", "sales": "売上", "gp": "粗利", "qty": "数量"}
             )
-            display["売上"] = display["売上"].map(_format_currency_short)
-            display["粗利"] = display["粗利"].map(_format_currency_short)
-            display["数量"] = display["数量"].map(lambda v: f"{float(v):,.0f}")
-            st.dataframe(display, use_container_width=True)
+            product_column_config = {
+                "売上": st.column_config.NumberColumn("売上", format="¥%,d"),
+                "粗利": st.column_config.NumberColumn("粗利", format="¥%,d"),
+                "数量": st.column_config.NumberColumn("数量", format="%,d"),
+            }
+            st.dataframe(
+                display,
+                use_container_width=True,
+                hide_index=True,
+                column_config=product_column_config,
+            )
 
     with tab_channel:
         channel_summary = (
@@ -1289,9 +1328,16 @@ def _render_sales_tab(
                     f"{lead_channel['channel']}チャネルが構成比{share * 100:.1f}%で最大です。構成比維持と他チャネルの底上げを検討しましょう。"
                 )
             display_ch = channel_summary.rename(columns={"channel": "チャネル", "sales": "売上", "gp": "粗利"})
-            display_ch["売上"] = display_ch["売上"].map(_format_currency_short)
-            display_ch["粗利"] = display_ch["粗利"].map(_format_currency_short)
-            st.dataframe(display_ch, use_container_width=True)
+            channel_column_config = {
+                "売上": st.column_config.NumberColumn("売上", format="¥%,d"),
+                "粗利": st.column_config.NumberColumn("粗利", format="¥%,d"),
+            }
+            st.dataframe(
+                display_ch,
+                use_container_width=True,
+                hide_index=True,
+                column_config=channel_column_config,
+            )
 
     store_summary = (
         current_period_df.groupby("store", as_index=False)["sales_amount"].sum().rename(columns={"sales_amount": "sales"})
@@ -1337,7 +1383,17 @@ def _render_sales_tab(
     if detail.empty:
         st.caption("この期間の明細はありません。")
     else:
-        st.dataframe(detail, use_container_width=True)
+        detail_column_config = {
+            "数量": st.column_config.NumberColumn("数量", format="%,d"),
+            "売上": st.column_config.NumberColumn("売上", format="¥%,d"),
+            "粗利": st.column_config.NumberColumn("粗利", format="¥%,d"),
+        }
+        st.dataframe(
+            detail,
+            use_container_width=True,
+            hide_index=True,
+            column_config=detail_column_config,
+        )
         period_str = selected_period.strftime("%Y-%m")
         store_label = selected_store if selected_store != _DEFAULT_STORE_OPTION else "全店舗"
         csv_name = f"売上_{period_str}_{store_label}.csv"
@@ -1447,9 +1503,16 @@ def _render_profit_tab(
                 f"{top_item['product_name']}が粗利額{_format_currency_short(top_item['gp'])}、粗利率{top_margin_text}で最も貢献しています。高粗利商品の販売機会を逃さないようフォローしましょう。"
             )
             display = product_gp.rename(columns={"product_name": "商品", "gp": "粗利", "sales": "売上"})
-            display["粗利"] = display["粗利"].map(_format_currency_short)
-            display["売上"] = display["売上"].map(_format_currency_short)
-            st.dataframe(display, use_container_width=True)
+            gp_column_config = {
+                "粗利": st.column_config.NumberColumn("粗利", format="¥%,d"),
+                "売上": st.column_config.NumberColumn("売上", format="¥%,d"),
+            }
+            st.dataframe(
+                display,
+                use_container_width=True,
+                hide_index=True,
+                column_config=gp_column_config,
+            )
 
     with tab_channel:
         channel_gp = (
@@ -1474,9 +1537,16 @@ def _render_profit_tab(
                 f"{lead_channel['channel']}チャネルが粗利{_format_currency_short(lead_channel['gp'])}、粗利率{lead_margin_text}でトップ。構成比が低いチャネルの改善余地も併せて検討しましょう。"
             )
             display = channel_gp.rename(columns={"channel": "チャネル", "gp": "粗利", "sales": "売上"})
-            display["粗利"] = display["粗利"].map(_format_currency_short)
-            display["売上"] = display["売上"].map(_format_currency_short)
-            st.dataframe(display, use_container_width=True)
+            channel_gp_config = {
+                "粗利": st.column_config.NumberColumn("粗利", format="¥%,d"),
+                "売上": st.column_config.NumberColumn("売上", format="¥%,d"),
+            }
+            st.dataframe(
+                display,
+                use_container_width=True,
+                hide_index=True,
+                column_config=channel_gp_config,
+            )
 
     detail = current_period_df[
         ["product_name", "category", "channel", "sold_qty", "sales_amount", "gross_profit"]
@@ -1491,10 +1561,17 @@ def _render_profit_tab(
             "gross_profit": "粗利",
         }
     )
-    detail["売上"] = detail["売上"].map(_format_currency_short)
-    detail["粗利"] = detail["粗利"].map(_format_currency_short)
-    detail["数量"] = detail["数量"].map(lambda v: f"{float(v):,.0f}")
-    st.dataframe(detail, use_container_width=True)
+    profit_detail_config = {
+        "数量": st.column_config.NumberColumn("数量", format="%,d"),
+        "売上": st.column_config.NumberColumn("売上", format="¥%,d"),
+        "粗利": st.column_config.NumberColumn("粗利", format="¥%,d"),
+    }
+    st.dataframe(
+        detail,
+        use_container_width=True,
+        hide_index=True,
+        column_config=profit_detail_config,
+    )
 
 
 def _render_inventory_tab(
@@ -1712,8 +1789,15 @@ def _render_cash_tab(
             "memo": "メモ",
         }
     )
-    display["金額"] = display["金額"].map(_format_currency_short)
-    st.dataframe(display, use_container_width=True)
+    cash_column_config = {
+        "金額": st.column_config.NumberColumn("金額", format="¥%,d"),
+    }
+    st.dataframe(
+        display,
+        use_container_width=True,
+        hide_index=True,
+        column_config=cash_column_config,
+    )
 
     period_str = selected_period.strftime("%Y-%m")
     store_label = selected_store if selected_store != _DEFAULT_STORE_OPTION else "全店舗"
@@ -1796,8 +1880,15 @@ def _render_value_added_tab(
 
     top_table = category_comp.copy()
     top_table = top_table.rename(columns={"category": "カテゴリ", "gross_profit": "付加価値 (円)"})
-    top_table["付加価値 (円)"] = top_table["付加価値 (円)"].map(lambda v: f"¥{v:,.0f}")
-    st.dataframe(top_table, use_container_width=True, hide_index=True)
+    value_column_config = {
+        "付加価値 (円)": st.column_config.NumberColumn("付加価値 (円)", format="¥%,d"),
+    }
+    st.dataframe(
+        top_table,
+        use_container_width=True,
+        hide_index=True,
+        column_config=value_column_config,
+    )
 
     st.caption("CSV/PDFは粗利タブからエクスポートできます。フィルタ条件が共通で反映されます。")
 
@@ -1837,22 +1928,24 @@ def _render_behavior_dashboard(products: Optional[pd.DataFrame]) -> None:
 
     _render_status_banner(default_period, default_store)
 
-    filter_container = st.container()
-    with filter_container:
-        fc1, fc2, fc3 = st.columns([0.4, 0.3, 0.3], gap="medium")
-        selected_period = fc1.selectbox(
+    selector_left, selector_right = st.columns([0.68, 0.32], gap="large")
+    with selector_right:
+        st.markdown("#### セグメント選択")
+        selected_period = st.selectbox(
             "期間",
             options=context["period_options"],
             format_func=lambda v: _format_period_label(v, "月次"),
             key="selected_period",
+            help="前回選択した期間を記憶し、再訪時に自動で復元します。",
         )
-        selected_store = fc2.selectbox(
+        selected_store = st.selectbox(
             "店舗",
             options=context["store_options"],
             key="selected_store",
+            help="全店舗または特定店舗を切り替えて分析します。",
         )
         if scenario_keys:
-            selected_scenario = fc3.selectbox(
+            selected_scenario = st.selectbox(
                 "シナリオ",
                 options=scenario_keys,
                 index=scenario_keys.index(current_scenario),
@@ -1950,10 +2043,10 @@ def _render_behavior_dashboard(products: Optional[pd.DataFrame]) -> None:
     va_delta = _store_delta(kpi_state, "avg_va", avg_va)
     gap_delta = _store_delta(kpi_state, "gap_to_req", gap_to_req)
 
-    kgi_cards: List[Dict[str, Any]] = []
+    diagnostic_cards: List[Dict[str, Any]] = []
     kpi_cards: List[Dict[str, Any]] = []
 
-    kgi_cards.append(
+    diagnostic_cards.append(
         {
             "title": "KGI｜意思決定時間を短縮",
             "value": f"{decision_hours:.1f}時間/月",
@@ -1963,7 +2056,7 @@ def _render_behavior_dashboard(products: Optional[pd.DataFrame]) -> None:
             "positive_is_good": True,
         }
     )
-    kgi_cards.append(
+    diagnostic_cards.append(
         {
             "title": "KGI｜誤判断を減らす",
             "value": f"品質リスク {issue_ratio:.1f}%",
@@ -2023,9 +2116,11 @@ def _render_behavior_dashboard(products: Optional[pd.DataFrame]) -> None:
             }
         )
 
-    if kgi_cards:
-        render_indicator_cards(kgi_cards)
+    if diagnostic_cards:
+        st.markdown("#### KPIスナップショット")
+        render_indicator_cards(diagnostic_cards)
     if kpi_cards:
+        st.markdown("#### KPI詳細")
         render_indicator_cards(kpi_cards)
 
     st.markdown("#### トレンド & 異常検知ハイライト")
@@ -2089,13 +2184,45 @@ def _render_behavior_dashboard(products: Optional[pd.DataFrame]) -> None:
     sales_now = float(current_period_df["sales_amount"].sum()) if not current_period_df.empty else 0.0
     gp_now = float(current_period_df["gross_profit"].sum()) if not current_period_df.empty else 0.0
     cash_balance = _compute_cash_balance(context["cash_daily"], selected_store)
+    sales_prev = float(previous_period_df["sales_amount"].sum()) if not previous_period_df.empty else np.nan
+    gp_prev = float(previous_period_df["gross_profit"].sum()) if not previous_period_df.empty else np.nan
+    cash_prev = _compute_cash_balance_for_period(
+        context["cash_daily"], selected_store, previous_period
+    )
 
-    kpi_col1, kpi_col2, kpi_col3 = st.columns(3)
-    kpi_col1.metric("売上高", _format_currency_short(sales_now))
-    kpi_col2.metric("粗利", _format_currency_short(gp_now))
-    kpi_col3.metric("現預金残高", _format_currency_short(cash_balance))
+    primary_cards = [
+        {
+            "title": "KGI｜売上高",
+            "value": _format_currency_short(sales_now),
+            "delta": _pct_change(sales_prev, sales_now),
+            "delta_format": "{:+.1f}%",
+            "note": "期間合計の売上。伸び率は前期比で表示します。",
+            "positive_is_good": True,
+        },
+        {
+            "title": "KGI｜粗利",
+            "value": _format_currency_short(gp_now),
+            "delta": _pct_change(gp_prev, gp_now),
+            "delta_format": "{:+.1f}%",
+            "note": "粗利額の推移は原価や値引きの影響を確認する指標です。",
+            "positive_is_good": True,
+        },
+        {
+            "title": "KGI｜資金残高",
+            "value": _format_currency_short(cash_balance),
+            "delta": cash_balance - cash_prev if np.isfinite(cash_prev) else None,
+            "delta_format": "{:+,.0f}円",
+            "note": "日次キャッシュフローから算出した月末残高です。",
+            "positive_is_good": True,
+        },
+    ]
 
-    tabs = st.tabs(["売上", "粗利", "在庫", "資金", "付加価値"])
+    with selector_left:
+        st.markdown("#### KGIダッシュボード")
+        render_indicator_cards(primary_cards)
+        st.caption("上位指標→トレンド→明細の順で重要情報を確認できます。")
+
+    tabs = st.tabs(["売上", "粗利", "在庫", "資金"])
     with tabs[0]:
         _render_sales_tab(
             context,
@@ -2141,15 +2268,6 @@ def _render_behavior_dashboard(products: Optional[pd.DataFrame]) -> None:
             context,
             selected_period=selected_period,
             selected_store=selected_store,
-        )
-    with tabs[4]:
-        _render_value_added_tab(
-            context,
-            selected_period=selected_period,
-            previous_period=previous_period,
-            selected_store=selected_store,
-            current_period_df=current_period_df,
-            previous_period_df=previous_period_df,
         )
 
 
