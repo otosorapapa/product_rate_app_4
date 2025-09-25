@@ -814,6 +814,13 @@ render_help_button("chat", container=help_col)
 render_onboarding()
 render_page_tutorial("chat")
 
+with st.sidebar:
+    st.markdown("### FAQ / 用語集")
+    st.caption("主要なドキュメントと用語集へのショートカットです。")
+    st.markdown("- [情報設計ガイド](docs/step2_ia_redesign.md)")
+    st.markdown("- [行動設計ダッシュボードの使い方](docs/step4_act_behavior_design.md)")
+    st.markdown("- [標準賃率ウィザードの手順](docs/step3_check.md)")
+
 if st.session_state.pop("chat_sample_notice", False):
     st.info("製品データが未設定だったためサンプル data/sample.xlsx を読み込みました。")
 if st.session_state.pop("chat_reset_notice", False):
@@ -845,19 +852,20 @@ if st.session_state.get("using_sample_data"):
 
 st.divider()
 
-faq_cols = st.columns(len(_FAQ_PRESETS) + 1)
-for col, (label, question) in zip(faq_cols, _FAQ_PRESETS):
-    if col.button(label):
+st.markdown("#### 🤖 AIに聞く（ショートカット）")
+st.caption("よくある質問をワンクリックで送信できます。")
+action_cols = st.columns(len(_FAQ_PRESETS))
+for col, (label, question) in zip(action_cols, _FAQ_PRESETS):
+    if col.button(f"AIに聞く｜{label}", use_container_width=True):
         st.session_state["chat_pending_question"] = question
-        st.rerun()
+        st.experimental_rerun()
 
-with faq_cols[-1]:
-    if st.button("会話をリセット"):
-        st.session_state["chat_history"] = []
-        st.session_state.pop("chat_last_signature", None)
-        st.session_state.pop("chat_pending_question", None)
-        st.session_state["chat_reset_notice"] = True
-        st.rerun()
+if st.button("会話をリセット"):
+    st.session_state["chat_history"] = []
+    st.session_state.pop("chat_last_signature", None)
+    st.session_state.pop("chat_pending_question", None)
+    st.session_state["chat_reset_notice"] = True
+    st.experimental_rerun()
 
 history = st.session_state.setdefault("chat_history", [])
 signature = _build_signature(rate_results, scenario_name, df_results)
@@ -878,7 +886,6 @@ else:
         st.session_state["chat_last_signature"] = signature
 
 pending_question = st.session_state.pop("chat_pending_question", None)
-user_message = st.chat_input("賃率や価格について質問してください")
 
 if pending_question:
     history.append({"role": "user", "content": pending_question})
@@ -887,7 +894,17 @@ if pending_question:
     )
     history.append({"role": "assistant", "content": answer})
 
-if user_message:
+chat_form = st.form("chat_input_form", clear_on_submit=True)
+with chat_form:
+    user_message = st.text_input(
+        "AIに質問する",
+        key="chat_user_input",
+        placeholder="例：必要賃率と損益分岐賃率の違いを教えて",
+        autofocus=True,
+    )
+    submitted = st.form_submit_button("送信", use_container_width=True)
+
+if submitted and user_message:
     history.append({"role": "user", "content": user_message})
     answer = _generate_answer(
         user_message, df_results, rate_results, scenario_name, benchmarks

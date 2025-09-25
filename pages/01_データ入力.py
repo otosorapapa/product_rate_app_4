@@ -7,7 +7,7 @@ if ROOT_DIR not in sys.path:
 
 from datetime import date, datetime, timedelta
 from io import BytesIO
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -79,6 +79,126 @@ render_help_button("data", container=help_col)
 render_onboarding()
 render_page_tutorial("data")
 render_stepper(1)
+
+if not st.session_state.get("_data_cards_style"):
+    st.markdown(
+        """
+        <style>
+        .data-intake-grid {
+            display: grid;
+            gap: 1rem;
+        }
+        @media (min-width: 1200px) {
+            .data-intake-grid {
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+            }
+        }
+        @media (max-width: 1199px) {
+            .data-intake-grid {
+                grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            }
+        }
+        .data-intake-card {
+            border-radius: 18px;
+            border: 1px solid rgba(49, 80, 120, 0.2);
+            padding: 1.1rem 1.25rem 1.25rem;
+            background: linear-gradient(150deg, #F6F8FB 0%, #EDF2F9 100%);
+            box-shadow: 0 12px 24px rgba(15, 28, 46, 0.08);
+        }
+        .data-intake-card h4 {
+            margin-bottom: 0.45rem;
+        }
+        .data-intake-card p {
+            font-size: 0.9rem;
+            color: #334155;
+            min-height: 3.8rem;
+        }
+        .data-intake-card .cta {
+            margin-top: 0.8rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.session_state["_data_cards_style"] = True
+
+
+def _redirect_to_dashboard() -> None:
+    """Redirect to the dashboard page when Streamlit API is available."""
+
+    try:
+        st.switch_page("pages/02_ダッシュボード.py")
+    except Exception:
+        st.session_state["nav_intent"] = "dashboard"
+        st.experimental_set_query_params(next="dashboard")
+        st.experimental_rerun()
+
+
+st.markdown(
+    """
+    #### データ取込オプション
+    1クリックで処理を開始できるカードを用意しました。最初に Excel フォーマットとサンプル値を確認してください。
+    """
+)
+
+st.session_state.setdefault("auto_redirect_dashboard", True)
+
+card_cols = st.columns(3, gap="large")
+
+upload_file: Optional[BytesIO] = None
+
+with card_cols[0]:
+    upload_container = st.container()
+    upload_container.markdown(
+        """
+        <div class="data-intake-card">
+            <h4>Excelファイルをアップロード</h4>
+            <p>最新の標賃・R6.12シートを取り込み、必要項目の自動チェックとテストを実行します。</p>
+            <div class="cta"></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    upload_file = upload_container.file_uploader(
+        "Excelを選択",
+        type=["xlsx"],
+        key="product_excel_uploader",
+        label_visibility="collapsed",
+        help="テンプレートの列名を変更していないか確認してください。",
+    )
+
+with card_cols[1]:
+    sample_container = st.container()
+    sample_container.markdown(
+        """
+        <div class="data-intake-card">
+            <h4>サンプルデータで試す</h4>
+            <p>社内データが準備できていなくても、製造業想定のサンプルSKUでダッシュボードを体験できます。</p>
+            <div class="cta"></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if sample_container.button("サンプルを読み込む", use_container_width=True):
+        st.session_state["force_sample_data"] = True
+        st.session_state.pop("product_excel_uploader", None)
+        st.experimental_rerun()
+
+with card_cols[2]:
+    edit_container = st.container()
+    edit_container.markdown(
+        """
+        <div class="data-intake-card">
+            <h4>アプリ内で直接編集</h4>
+            <p>アップロード後のSKUをそのままアプリ上で追加入力・修正し、Excelへ書き戻すことも可能です。</p>
+            <div class="cta"></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if edit_container.button("編集モードを開く", use_container_width=True):
+        st.session_state["show_inline_editor"] = True
+
 
 restored_from_cache = False
 if "df_products_raw" not in st.session_state:
@@ -164,9 +284,16 @@ st.caption("※『標賃』シートにもサンプル値を用意していま�
 st.divider()
 
 default_path = "data/sample.xlsx"
-file = st.file_uploader("Excelをアップロード（未指定ならサンプルを使用）", type=["xlsx"])
+force_sample = st.session_state.pop("force_sample_data", False)
+file = upload_file
 
-if file is not None or "df_products_raw" not in st.session_state:
+should_trigger_load = (
+    file is not None
+    or force_sample
+    or "df_products_raw" not in st.session_state
+)
+
+if should_trigger_load:
     if file is None:
         st.info("サンプルデータを使用します。")
         xls = read_excel_safely(default_path)
@@ -179,14 +306,18 @@ if file is not None or "df_products_raw" not in st.session_state:
         st.error("Excel 読込に失敗しました。ファイル形式・シート名をご確認ください。")
         st.stop()
 
-    with st.spinner("『標賃』を解析中..."):
-        calc_params, sr_params, warn1 = parse_hyochin(xls)
-
-    with st.spinner("『R6.12』製品データを解析中..."):
-        df_products, warn2 = parse_products(xls, sheet_name="R6.12")
-
+    status_placeholder = st.empty()
+    progress_bar = st.progress(0.05)
+    status_placeholder.info("『標賃』を解析中…")
+    calc_params, sr_params, warn1 = parse_hyochin(xls)
+    progress_bar.progress(0.35)
+    status_placeholder.info("『R6.12』製品データを解析中…")
+    df_products, warn2 = parse_products(xls, sheet_name="R6.12")
+    progress_bar.progress(0.7)
     for w in (warn1 + warn2):
         st.warning(w)
+    progress_bar.progress(1.0)
+    status_placeholder.success("取り込みテストが完了しました。KPIカードを初期化します。")
 
     if st.session_state.get("using_sample_data"):
         df_products = df_products.copy()
@@ -294,7 +425,10 @@ if file is not None or "df_products_raw" not in st.session_state:
         )
 
     edited_df = df_products
-    with st.expander("アプリ内で直接編集・追加入力", expanded=False):
+    with st.expander(
+        "アプリ内で直接編集・追加入力",
+        expanded=st.session_state.get("show_inline_editor", False),
+    ):
         st.caption(
             "Excelに戻らずに主要列を更新できます。数値はテンプレートと同じ単位で入力してください。"
         )
@@ -321,6 +455,8 @@ if file is not None or "df_products_raw" not in st.session_state:
         df_products = edited_df.copy()
     else:
         df_products = pd.DataFrame(edited_df)
+    if st.session_state.get("show_inline_editor"):
+        st.session_state["show_inline_editor"] = False
     df_products.attrs["column_unit_info"] = column_unit_info
 
     numeric_cols = [
@@ -427,10 +563,16 @@ if file is not None or "df_products_raw" not in st.session_state:
     st.session_state["sr_params"] = sr_params
     st.session_state["df_products_raw"] = df_products
     st.session_state["calc_params"] = calc_params
+    st.session_state["pending_redirect_dashboard"] = True
 else:
     sr_params = st.session_state["sr_params"]
     df_products = st.session_state["df_products_raw"]
     calc_params = st.session_state.get("calc_params", {})
+
+if st.session_state.pop("pending_redirect_dashboard", False):
+    st.success("データ取込が完了しました。ダッシュボードを準備しています…")
+    if st.session_state.get("auto_redirect_dashboard", True):
+        _redirect_to_dashboard()
 
 if "scenarios" not in st.session_state:
     st.session_state["scenarios"] = {"ベース": sr_params.copy()}

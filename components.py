@@ -1,4 +1,6 @@
+import html
 import json
+import math
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
@@ -58,6 +60,8 @@ _THEME_PALETTES: Dict[str, Dict[str, str]] = {
     },
 }
 
+_INDICATOR_STYLE_KEY = "_indicator_card_styles_injected"
+
 _FONT_SCALE_OPTIONS: Dict[str, float] = {
     "ふつう": 1.0,
     "大きめ": 1.15,
@@ -114,6 +118,154 @@ def _persist_accessibility_prefs(theme_key: str, font_key: str) -> None:
         f"window.localStorage.setItem('{_ACCESSIBILITY_STORAGE_KEY}', JSON.stringify({payload_json}))",
         "set",
     )
+
+
+def _inject_indicator_styles() -> None:
+    """Inject shared CSS styles for KPI/KGI indicator cards once per session."""
+
+    if st.session_state.get(_INDICATOR_STYLE_KEY):
+        return
+
+    st.markdown(
+        """
+        <style>
+        .indicator-grid {
+            display: grid;
+            gap: 0.75rem;
+        }
+        @media (min-width: 1280px) {
+            .indicator-grid {
+                grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            }
+        }
+        @media (max-width: 1279px) {
+            .indicator-grid {
+                grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            }
+        }
+        .indicator-card {
+            background: linear-gradient(145deg, #0F1C2E, #1C2F4A);
+            border-radius: 16px;
+            padding: 1.1rem 1.25rem;
+            box-shadow: 0 12px 24px rgba(19, 41, 75, 0.18);
+            border: 1px solid rgba(99, 122, 168, 0.25);
+            color: #F4F7FB;
+            min-height: 150px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+        .indicator-card h4 {
+            font-size: 0.95rem;
+            margin: 0 0 0.35rem 0;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+        }
+        .indicator-value {
+            font-size: 1.9rem;
+            font-weight: 700;
+            margin-bottom: 0.15rem;
+            line-height: 1.2;
+        }
+        .indicator-delta {
+            font-size: 0.9rem;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+            margin-bottom: 0.3rem;
+        }
+        .indicator-delta.neutral {
+            color: #C1CEDF;
+        }
+        .indicator-delta.positive {
+            color: #67A28F;
+        }
+        .indicator-delta.negative {
+            color: #D97A7A;
+        }
+        .indicator-note {
+            font-size: 0.78rem;
+            line-height: 1.4;
+            color: rgba(233, 242, 255, 0.82);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.session_state[_INDICATOR_STYLE_KEY] = True
+
+
+def render_indicator_cards(cards: List[Dict[str, Any]]) -> None:
+    """Render KPI/KGI indicator cards with consistent styling."""
+
+    if not cards:
+        return
+
+    _inject_indicator_styles()
+
+    card_blocks: List[str] = ["<div class='indicator-grid'>"]
+    for card in cards:
+        title = card.get("title", "")
+        value = card.get("value", "-")
+        note = card.get("note", "")
+        delta_val = card.get("delta")
+        delta_format = card.get("delta_format", "{:+.1f}")
+        positive_is_good = bool(card.get("positive_is_good", True))
+
+        trend_class = "neutral"
+        delta_text = card.get("delta_text")
+        if delta_text is None:
+            if delta_val is None:
+                delta_text = "→±0"
+            else:
+                try:
+                    numeric = float(delta_val)
+                except (TypeError, ValueError):
+                    delta_text = str(delta_val)
+                else:
+                    if math.isnan(numeric):
+                        delta_text = "→±0"
+                    else:
+                        arrow = "→"
+                        if abs(numeric) < 1e-9:
+                            trend_class = "neutral"
+                            delta_text = "→±0"
+                        else:
+                            arrow = "▲" if numeric > 0 else "▼"
+                            abs_value = abs(numeric)
+                            formatted = delta_format.format(abs_value)
+                            formatted = formatted.replace("+", "")
+                            delta_text = f"{arrow}{formatted}"
+                            is_positive = numeric > 0
+                            if positive_is_good:
+                                trend_class = "positive" if is_positive else "negative"
+                            else:
+                                trend_class = "negative" if is_positive else "positive"
+        else:
+            trend_class = card.get("trend_class", "neutral")
+
+        card_blocks.append(
+            """
+            <div class='indicator-card'>
+                <div>
+                    <h4>{title}</h4>
+                    <div class='indicator-value'>{value}</div>
+                    <div class='indicator-delta {trend_class}'>{delta_text}</div>
+                </div>
+                <div class='indicator-note'>{note}</div>
+            </div>
+            """.format(
+                title=html.escape(str(title)),
+                value=html.escape(str(value)),
+                delta_text=html.escape(str(delta_text)),
+                note=html.escape(str(note)),
+                trend_class=trend_class,
+            )
+        )
+
+    card_blocks.append("</div>")
+    st.markdown("\n".join(card_blocks), unsafe_allow_html=True)
 
 _HELP_CONTENT: Dict[str, Dict[str, Any]] = {
     "home": {
