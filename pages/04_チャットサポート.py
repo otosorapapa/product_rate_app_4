@@ -21,16 +21,9 @@ from components import (
 )
 from offline import restore_session_state_from_cache, sync_offline_cache
 from standard_rate_core import DEFAULT_PARAMS, compute_rates, sanitize_params
-from rate_utils import (
-    compute_results,
-    infer_category_from_name,
-    infer_major_customer,
-    parse_hyochin,
-    parse_products,
-    read_excel_safely,
-)
+from rate_utils import compute_results
+from sample_data import ensure_sample_session_state
 
-_SAMPLE_PATH = "data/sample.xlsx"
 _FAQ_PRESETS = [
     ("損益分岐賃率の違い", "損益分岐賃率と必要賃率の違いを教えて"),
     ("必要販売単価（例:苺大福）", "苺大福の必要販売単価はいくらですか？"),
@@ -734,38 +727,13 @@ def _build_signature(rates: Dict[str, float], scenario: str, df: pd.DataFrame) -
     return (req_sig, be_sig, scenario, total)
 
 
-def _bootstrap_sample_data() -> None:
-    xls = read_excel_safely(_SAMPLE_PATH)
-    if xls is None:
-        return
-    calc_params, sr_params, _ = parse_hyochin(xls)
-    df_products, _ = parse_products(xls, sheet_name="R6.12")
-    if df_products.empty:
-        return
-    df_products = df_products.copy()
-    if "category" not in df_products.columns or df_products["category"].isna().all():
-        df_products["category"] = df_products.get("product_name", pd.Series(dtype=str)).apply(
-            infer_category_from_name
-        )
-    if "major_customer" not in df_products.columns or df_products["major_customer"].isna().all():
-        df_products["major_customer"] = [
-            infer_major_customer(no, name)
-            for no, name in zip(
-                df_products.get("product_no"), df_products.get("product_name")
-            )
-        ]
-    st.session_state["df_products_raw"] = df_products
-    st.session_state.setdefault("calc_params", calc_params)
-    st.session_state.setdefault("sr_params", sr_params)
-    st.session_state.setdefault("scenarios", {"ベース": st.session_state["sr_params"].copy()})
-    st.session_state.setdefault("current_scenario", "ベース")
-    st.session_state["using_sample_data"] = True
-    st.session_state["chat_sample_notice"] = True
-
-
 def _prepare_context() -> tuple[pd.DataFrame, Dict[str, float], str]:
-    if "df_products_raw" not in st.session_state or st.session_state["df_products_raw"] is None:
-        _bootstrap_sample_data()
+    if (
+        "df_products_raw" not in st.session_state
+        or st.session_state["df_products_raw"] is None
+        or len(st.session_state.get("df_products_raw") or []) == 0
+    ):
+        ensure_sample_session_state(notice_key="chat_sample_notice")
     df_products = st.session_state.get("df_products_raw")
     if df_products is None or df_products.empty:
         return pd.DataFrame(), {}, st.session_state.get("current_scenario", "ベース")

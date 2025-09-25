@@ -37,6 +37,7 @@ from components import (
     render_indicator_cards,
 )
 from offline import restore_session_state_from_cache, sync_offline_cache
+from sample_data import ensure_sample_session_state
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -3476,6 +3477,10 @@ def reset_quick_params() -> None:
     st.session_state["quick_volume"] = 0
     st.session_state["quick_material"] = 0
     st.session_state["active_simulation"] = "ベース"
+
+ensure_sample_session_state(notice_key="dashboard_sample_notice")
+if st.session_state.pop("dashboard_sample_notice", False):
+    st.info("製品データが未設定だったためサンプル data/sample.xlsx を自動読み込みしました。")
 
 if (
     "df_products_raw" not in st.session_state

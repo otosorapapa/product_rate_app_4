@@ -7,7 +7,7 @@ if ROOT_DIR not in sys.path:
 
 from datetime import date, datetime, timedelta
 from io import BytesIO
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -45,6 +45,7 @@ from components import (
     render_sidebar_nav,
     render_top_navbar,
 )
+from sample_data import load_sample_workbook
 from offline import (
     mark_restore_notice_shown,
     restore_session_state_from_cache,
@@ -67,34 +68,12 @@ def _format_fermi_value(value: Any) -> str:
     return f"{number:,.2f}"
 
 
-@st.cache_data(show_spinner=False)
-def _load_sample_bytes(path: str) -> bytes:
-    """Read bundled sample data and cache the result for repeated use."""
+def _issue_key(product_no: Any, product_name: Any) -> Tuple[str, str]:
+    """Return a normalised tuple key for identifying issue rows."""
 
-    sample_path = Path(path)
-    if not sample_path.exists():
-        raise FileNotFoundError(f"サンプルファイルが見つかりません: {sample_path}")
-    return sample_path.read_bytes()
-
-
-def _load_sample_workbook(path: str) -> Optional[pd.ExcelFile]:
-    """Return an ExcelFile for the bundled sample with detailed errors."""
-
-    try:
-        sample_bytes = _load_sample_bytes(path)
-    except FileNotFoundError as exc:
-        st.error("サンプルデータが見つかりません。管理者にファイル配置を確認してください。")
-        st.caption(str(exc))
-        return None
-    except Exception as exc:  # pragma: no cover - unexpected IO issues
-        st.error("サンプルデータの読み込みで予期せぬエラーが発生しました。")
-        st.caption(str(exc))
-        return None
-
-    workbook = read_excel_safely(BytesIO(sample_bytes))
-    if workbook is None:
-        st.error("サンプルデータのExcel形式を解釈できませんでした。テンプレートを再取得してください。")
-    return workbook
+    no = "" if pd.isna(product_no) else str(product_no).strip()
+    name = "" if pd.isna(product_name) else str(product_name).strip()
+    return no, name
 
 
 apply_user_theme()
@@ -185,6 +164,31 @@ st.caption("Excel（R6.12形式）をアップロードするか、サンプル/
 
 st.session_state.setdefault("auto_redirect_dashboard", True)
 
+guide_steps = [
+    {
+        "title": "ファイル準備",
+        "summary": "テンプレートを確認し、Excelをアップロードするかサンプルを確認します。",
+        "detail": "テンプレートの必須列・単位を確認し、自社データを上書きしたExcelを用意します。サンプルから始める場合は後で上書き可能です。",
+    },
+    {
+        "title": "自動検証",
+        "summary": "取り込み後に実行される品質チェックの結果を確認します。",
+        "detail": "エラー行は赤、注意行は黄で表示されます。Excelで修正後、再度アップロードすると最新の状態に更新されます。",
+    },
+    {
+        "title": "ダッシュボード更新",
+        "summary": "検証を通過したらダッシュボードでKPIを確認します。",
+        "detail": "必要賃率や未達SKUが自動更新されます。次のステップで標準賃率ウィザードを起動し、シミュレーションに進みましょう。",
+    },
+]
+step_cols = st.columns(3, gap="large")
+for idx, (col, step) in enumerate(zip(step_cols, guide_steps), start=1):
+    with col:
+        st.markdown(f"**STEP {idx}. {step['title']}**")
+        st.caption(step["summary"])
+        with st.popover("詳しく", use_container_width=True):
+            st.write(step["detail"])
+
 card_cols = st.columns(3, gap="large")
 
 upload_file: Optional[BytesIO] = None
@@ -231,15 +235,15 @@ with card_cols[2]:
     edit_container.markdown(
         """
         <div class="data-intake-card">
-            <h4>アプリ内で直接編集</h4>
-            <p>読み込んだSKUをブラウザ上で追加入力し、Excelに書き出して共有できます。</p>
+            <h4>検証結果と入力ガイド</h4>
+            <p>自動チェックの結果を赤/黄でハイライトし、Excel修正と再アップロードのポイントを整理します。</p>
             <div class="cta"></div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    if edit_container.button("編集モードを開く", use_container_width=True):
-        st.session_state["show_inline_editor"] = True
+    if edit_container.button("検証ハイライトを開く", use_container_width=True):
+        st.session_state["focus_validation"] = True
 
 
 restored_from_cache = False
@@ -325,7 +329,7 @@ st.caption("※『標賃』シートにもサンプル値を用意していま�
 
 st.divider()
 
-default_path = "data/sample.xlsx"
+default_path = Path("data/sample.xlsx")
 force_sample = st.session_state.pop("force_sample_data", False)
 file = upload_file
 
@@ -338,7 +342,10 @@ should_trigger_load = (
 if should_trigger_load:
     if file is None:
         st.info("サンプルデータを使用します。")
-        xls = _load_sample_workbook(default_path)
+        xls = load_sample_workbook(default_path)
+        if xls is None:
+            st.error("サンプルデータの読み込みに失敗しました。data/sample.xlsx の配置を確認してください。")
+            st.stop()
         st.session_state["using_sample_data"] = True
     else:
         xls = read_excel_safely(file)
@@ -483,40 +490,6 @@ if should_trigger_load:
             help=derived_help.get(col),
             disabled=True,
         )
-
-    edited_df = df_products
-    with st.expander(
-        "アプリ内で直接編集・追加入力",
-        expanded=st.session_state.get("show_inline_editor", False),
-    ):
-        st.caption(
-            "Excelに戻らずに主要列を更新できます。数値はテンプレートと同じ単位で入力してください。"
-        )
-        edited_df = st.data_editor(
-            df_products,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="inline_products_editor",
-            column_config=column_config,
-            hide_index=True,
-        )
-        export_buffer = BytesIO()
-        export_df = edited_df.copy()
-        export_df.to_excel(export_buffer, index=False, sheet_name="products")
-        st.download_button(
-            "編集内容をExcelでエクスポート",
-            data=export_buffer.getvalue(),
-            file_name="edited_products.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
-
-    if isinstance(edited_df, pd.DataFrame):
-        df_products = edited_df.copy()
-    else:
-        df_products = pd.DataFrame(edited_df)
-    if st.session_state.get("show_inline_editor"):
-        st.session_state["show_inline_editor"] = False
     df_products.attrs["column_unit_info"] = column_unit_info
 
     numeric_cols = [
@@ -550,6 +523,90 @@ if should_trigger_load:
         st.warning(msg)
     for msg in errors:
         st.error(msg)
+
+    error_issue_keys: Set[Tuple[str, str]] = set()
+    warning_issue_keys: Set[Tuple[str, str]] = set()
+    highlight_html: Optional[str] = None
+
+    if not detail_df.empty:
+        for _, issue in detail_df.iterrows():
+            if issue.get("製品番号") == "全体":
+                continue
+            key = _issue_key(issue.get("製品番号"), issue.get("製品名"))
+            if key == ("", ""):
+                continue
+            if issue.get("レベル") == "エラー":
+                error_issue_keys.add(key)
+            else:
+                warning_issue_keys.add(key)
+        warning_issue_keys.difference_update(error_issue_keys)
+
+        highlight_columns = [
+            "product_no",
+            "product_name",
+            "actual_unit_price",
+            "material_unit_cost",
+            "minutes_per_unit",
+            "daily_qty",
+            "va_per_min",
+        ]
+        highlight_columns = [col for col in highlight_columns if col in df_products.columns]
+        if highlight_columns:
+            highlight_df = df_products[highlight_columns].copy()
+            rename_map = {
+                col: column_labels.get(col, derived_labels.get(col, col))
+                for col in highlight_columns
+            }
+            highlight_df = highlight_df.rename(columns=rename_map)
+            product_no_label = rename_map.get("product_no", "product_no")
+            product_name_label = rename_map.get("product_name", "product_name")
+
+            def _highlight_row(row: pd.Series) -> List[str]:
+                key = _issue_key(row.get(product_no_label), row.get(product_name_label))
+                if key in error_issue_keys:
+                    return ["background-color: #FDEAEA"] * len(row)
+                if key in warning_issue_keys:
+                    return ["background-color: #FFF7E1"] * len(row)
+                return [""] * len(row)
+
+            highlight_formats = {
+                rename_map[col]: number_formats.get(col)
+                for col in highlight_columns
+                if number_formats.get(col)
+            }
+            highlight_html = (
+                highlight_df.style.apply(_highlight_row, axis=1)
+                .format(highlight_formats)
+                .to_html(index=False)
+            )
+
+    preview_expanded = focus_validation or bool(highlight_html)
+    with st.expander(
+        "読み込んだデータを確認（Excelで修正）",
+        expanded=preview_expanded or not detail_df.empty,
+    ):
+        st.caption("列ヘッダーのツールチップから入力ルールを再確認し、Excelで修正後に再アップロードしてください。")
+        st.dataframe(
+            df_products,
+            use_container_width=True,
+            column_config=column_config,
+            hide_index=True,
+        )
+        export_buffer = BytesIO()
+        export_df = df_products.copy()
+        export_df.to_excel(export_buffer, index=False, sheet_name="products")
+        st.download_button(
+            "現在のデータをExcelでダウンロード",
+            data=export_buffer.getvalue(),
+            file_name="product_master_latest.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+        if highlight_html:
+            st.caption("赤=致命的エラー／黄=注意。該当行を優先的に修正してください。")
+            st.markdown(highlight_html, unsafe_allow_html=True)
+        else:
+            st.caption("ハイライトされた行はありません。品質チェックを通過しています。")
 
     if not detail_df.empty:
         level_map = {"エラー": "致命的", "警告": "注意"}
@@ -588,7 +645,10 @@ if should_trigger_load:
         styled = display_df.style.apply(_highlight_issue, axis=1).format(
             {"入力ガイド": _format_anchor_cell}, escape=False
         )
-        with st.expander("検知されたデータ品質アラートの詳細", expanded=bool(errors)):
+        with st.expander(
+            "検知されたデータ品質アラートの詳細",
+            expanded=bool(errors) or focus_validation,
+        ):
             st.caption("致命的な項目は赤、注意項目は黄でハイライトしています。")
             st.markdown(styled.to_html(index=False), unsafe_allow_html=True)
             option_labels = [
@@ -666,6 +726,7 @@ if keyword:
 else:
     df_view = df_products
 st.dataframe(df_view, use_container_width=True)
+st.caption("※ 表示専用です。Excelで修正した内容を再アップロードすると更新されます。")
 
 with st.expander("新規製品を追加", expanded=False):
     with st.form("add_product_form"):
