@@ -1135,55 +1135,47 @@ def render_sidebar_nav(*, page_key: Optional[str] = None) -> None:
                 st.sidebar.caption(f"{term}: {_GLOSSARY[term]}")
 
     st.sidebar.divider()
-    st.sidebar.subheader("👁 アクセシビリティ設定")
-    caption_lines = [
-        "視認性が気になる場合は、ここから配色と文字サイズを調整してください。",
-    ]
-    if streamlit_js_eval is not None:
-        caption_lines.append("設定は同じブラウザで保持されます。")
-    else:
-        caption_lines.append("ブラウザ保存が利用できない環境では、設定はセッション終了時にリセットされます。")
-    st.sidebar.caption("\n".join(caption_lines))
+    display_settings = st.sidebar.expander("表示設定（任意）", expanded=False)
+    with display_settings:
+        st.caption("配色と文字サイズをここでまとめて調整できます。")
 
-    theme_options = list(_THEME_PALETTES.keys())
-    selected_theme = st.sidebar.selectbox(
-        "配色テーマ",
-        theme_options,
-        key="ui_theme",
-        help="背景色とアクセントカラーの組み合わせを切り替えます。コントラストが強いテーマほど文字がくっきり表示されます。",
-    )
-    palette_preview = _THEME_PALETTES[selected_theme]
-    st.sidebar.caption(palette_preview["description"])
+        theme_options = list(_THEME_PALETTES.keys())
+        selected_theme = st.selectbox(
+            "配色テーマ",
+            theme_options,
+            key="ui_theme",
+            help="背景色とアクセントカラーの組み合わせを切り替えます。",
+        )
+        palette_preview = _THEME_PALETTES[selected_theme]
+        st.caption(palette_preview["description"])
 
-    font_options = list(_FONT_SCALE_OPTIONS.keys())
-    selected_font = st.sidebar.radio(
-        "文字サイズ",
-        font_options,
-        key="ui_font_scale",
-        help="本文・見出し・テーブルをまとめて拡大します。大きいほど読みやすくなります。",
-    )
-    if streamlit_js_eval is not None:
-        persistence_note = "選択は同一ブラウザ内で保持されます。"
-    else:
-        persistence_note = "選択はページ再読み込みで初期化されます。"
-    st.sidebar.caption(
-        f"現在の文字サイズ: **{selected_font}** ／ {persistence_note}"
-    )
+        font_options = list(_FONT_SCALE_OPTIONS.keys())
+        selected_font = st.radio(
+            "文字サイズ",
+            font_options,
+            key="ui_font_scale",
+            help="本文・見出し・テーブルをまとめて拡大します。",
+        )
+        if streamlit_js_eval is not None:
+            persistence_note = "選択は同一ブラウザ内で保持されます。"
+        else:
+            persistence_note = "選択はページ再読み込みで初期化されます。"
+        st.caption(f"現在の文字サイズ: **{selected_font}** ／ {persistence_note}")
 
-    font_scale = _FONT_SCALE_OPTIONS[selected_font]
-    preview_font_px = round(16 * font_scale, 1)
-    preview_small_px = round(preview_font_px * 0.85, 1)
-    st.sidebar.markdown(
-        f"""
-        <div style="margin-top:0.4rem; padding:0.7rem 0.85rem; border-radius:12px; border:1px solid {palette_preview['border']}; background:{palette_preview['surface']}; color:{palette_preview['text']}; font-size:{preview_font_px}px; line-height:1.6;">
-            <div style="font-weight:700;">Aa あア 123</div>
-            <div style="font-size:{preview_small_px}px; color:{palette_preview['muted']}; margin-top:0.25rem;">現在のテーマと文字サイズのプレビューです。</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        font_scale = _FONT_SCALE_OPTIONS[selected_font]
+        preview_font_px = round(16 * font_scale, 1)
+        preview_small_px = round(preview_font_px * 0.85, 1)
+        st.markdown(
+            f"""
+            <div style="margin-top:0.4rem; padding:0.7rem 0.85rem; border-radius:12px; border:1px solid {palette_preview['border']}; background:{palette_preview['surface']}; color:{palette_preview['text']}; font-size:{preview_font_px}px; line-height:1.6;">
+                <div style="font-weight:700;">Aa あア 123</div>
+                <div style="font-size:{preview_small_px}px; color:{palette_preview['muted']}; margin-top:0.25rem;">現在のテーマと文字サイズのプレビューです。</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    _persist_accessibility_prefs(selected_theme, selected_font)
+        _persist_accessibility_prefs(selected_theme, selected_font)
 
     st.sidebar.caption(_ONBOARDING_EFFECT)
 

@@ -432,7 +432,13 @@ def render_info_popover(label: str, content: str, container: Optional[Any] = Non
             st.info(content)
 
 
-def render_wizard_nav(current_step: int, location: str = "top") -> None:
+def render_wizard_nav(
+    current_step: int,
+    location: str = "top",
+    *,
+    next_disabled: bool = False,
+    next_disabled_help: Optional[str] = None,
+) -> None:
     """Render navigation buttons for the guided wizard."""
 
     total_steps = len(WIZARD_STEPS)
@@ -450,18 +456,63 @@ def render_wizard_nav(current_step: int, location: str = "top") -> None:
         st.session_state["sr_wizard_step"] = max(current_step - 1, 0)
         st.rerun()
 
-    next_disabled = current_step >= total_steps - 1
-    next_label = "次へ →" if not next_disabled else "ウィザード完了"
+    is_last_step = current_step >= total_steps - 1
+    disable_next = next_disabled or is_last_step
+    next_label = "次へ →" if not is_last_step else "ウィザード完了"
     if next_col.button(
         next_label,
-        disabled=next_disabled,
+        disabled=disable_next,
         use_container_width=True,
         key=f"sr_nav_next_{location}_{current_step}",
+        help=next_disabled_help if (next_disabled and not is_last_step) else None,
     ):
         st.session_state["sr_wizard_step"] = min(current_step + 1, total_steps - 1)
         st.rerun()
 
     nav_container.markdown("</div>", unsafe_allow_html=True)
+
+
+def validate_wizard_step(
+    current_step: int, params: dict[str, float]
+) -> tuple[list[str], dict[str, str]]:
+    """Return validation messages and field-level hints for the wizard."""
+
+    messages: list[str] = []
+    field_messages: dict[str, str] = {}
+
+    if current_step == 0:
+        headcount = (
+            params.get("fulltime_workers", 0.0)
+            + params.get("part1_workers", 0.0)
+            + params.get("part2_workers", 0.0) * params.get("part2_coefficient", 0.0)
+        )
+        if headcount <= 0:
+            msg = "正社員または準社員の人数を1名以上入力してください。"
+            messages.append(msg)
+            field_messages["fulltime_workers"] = msg
+            field_messages["part1_workers"] = "準社員Aの人数を入力すると正味工数を計算できます。"
+            field_messages["part2_workers"] = "準社員Bの人数を入力すると稼働係数を反映できます。"
+    elif current_step == 2:
+        labor_cost = params.get("labor_cost", 0.0)
+        sga_cost = params.get("sga_cost", 0.0)
+        if labor_cost <= 0 and sga_cost <= 0:
+            msg = "労務費または販管費を入力してください。"
+            messages.append(msg)
+            field_messages["labor_cost"] = "労務費が0のままです。標準人件費を入力してください。"
+            field_messages["sga_cost"] = "販管費が0のままです。固定的に発生する費用を入力してください。"
+    elif current_step == 3:
+        loan = params.get("loan_repayment", 0.0)
+        tax = params.get("tax_payment", 0.0)
+        future = params.get("future_business", 0.0)
+        if loan <= 0 and tax <= 0 and future <= 0:
+            msg = "確保したい利益額を少なくとも1項目入力してください。"
+            messages.append(msg)
+            shared_hint = "借入返済・納税・未来事業費のいずれかを入力すると必要賃率に反映されます。"
+            field_messages["loan_repayment"] = shared_hint
+            field_messages["tax_payment"] = shared_hint
+            field_messages["future_business"] = shared_hint
+
+    return messages, field_messages
 
 
 def _explain_standard_rate(
@@ -820,6 +871,11 @@ restore_session_state_from_cache()
 
 render_sidebar_nav(page_key="standard_rate")
 
+if "df_products_raw" not in st.session_state or st.session_state.get("df_products_raw") is None:
+    st.info("データがまだ取り込まれていません。『① データ入力』でExcelを読み込むかサンプルを使用してください。")
+    st.page_link("pages/01_データ入力.py", label="データ入力ページを開く", icon="📥")
+    st.stop()
+
 if "sr_language" not in st.session_state:
     st.session_state["sr_language"] = LANGUAGE_DEFAULT
 
@@ -1083,6 +1139,7 @@ if current_step >= total_steps:
 st.session_state["sr_wizard_step"] = current_step
 
 st.markdown("### ガイド付き入力")
+st.caption("※ * は必須入力です。")
 render_wizard_stepper(current_step)
 
 placeholders: dict[str, Any] = {}
@@ -1102,7 +1159,7 @@ with step_container.container():
         staff_cols = st.columns(3, gap="large")
         with staff_cols[0]:
             params["fulltime_workers"] = st.number_input(
-                "正社員の人数",
+                "正社員の人数 *",
                 value=float(params["fulltime_workers"]),
                 step=0.5,
                 format="%.2f",
@@ -1112,7 +1169,7 @@ with step_container.container():
             placeholders["fulltime_workers"] = st.empty()
         with staff_cols[1]:
             params["part1_workers"] = st.number_input(
-                "準社員Aの人数（短時間）",
+                "準社員Aの人数（短時間） *",
                 value=float(params["part1_workers"]),
                 step=0.5,
                 format="%.2f",
@@ -1122,7 +1179,7 @@ with step_container.container():
             placeholders["part1_workers"] = st.empty()
         with staff_cols[2]:
             params["part2_workers"] = st.number_input(
-                "準社員Bの人数（柔軟シフト）",
+                "準社員Bの人数（柔軟シフト） *",
                 value=float(params["part2_workers"]),
                 step=0.5,
                 format="%.2f",
@@ -1192,7 +1249,7 @@ with step_container.container():
         cost_cols = st.columns(2, gap="large")
         with cost_cols[0]:
             params["labor_cost"] = st.number_input(
-                "労務費（年間）",
+                "労務費（年間） *",
                 value=float(params["labor_cost"]),
                 step=1000.0,
                 format="%.0f",
@@ -1202,7 +1259,7 @@ with step_container.container():
             placeholders["labor_cost"] = st.empty()
         with cost_cols[1]:
             params["sga_cost"] = st.number_input(
-                "販管費（年間）",
+                "販管費（年間） *",
                 value=float(params["sga_cost"]),
                 step=1000.0,
                 format="%.0f",
@@ -1222,7 +1279,7 @@ with step_container.container():
         profit_cols = st.columns(3, gap="large")
         with profit_cols[0]:
             params["loan_repayment"] = st.number_input(
-                "借入返済（年間）",
+                "借入返済（年間） *",
                 value=float(params["loan_repayment"]),
                 step=1000.0,
                 format="%.0f",
@@ -1232,7 +1289,7 @@ with step_container.container():
             placeholders["loan_repayment"] = st.empty()
         with profit_cols[1]:
             params["tax_payment"] = st.number_input(
-                "納税・納付（年間）",
+                "納税・納付（年間） *",
                 value=float(params["tax_payment"]),
                 step=1000.0,
                 format="%.0f",
@@ -1242,7 +1299,7 @@ with step_container.container():
             placeholders["tax_payment"] = st.empty()
         with profit_cols[2]:
             params["future_business"] = st.number_input(
-                "未来事業費（投資原資）",
+                "未来事業費（投資原資） *",
                 value=float(params["future_business"]),
                 step=1000.0,
                 format="%.0f",
@@ -1257,6 +1314,8 @@ with step_container.container():
 
 step_container.markdown("</div>", unsafe_allow_html=True)
 
+validation_messages, field_messages = validate_wizard_step(current_step, params)
+
 params, warn_list = sanitize_params(params)
 for w in warn_list:
     st.sidebar.warning(w)
@@ -1267,6 +1326,9 @@ st.session_state["scenarios"] = scenarios
 nodes, results = compute_rates(params)
 reverse_index = build_reverse_index(nodes)
 for k, ph in placeholders.items():
+    if field_messages.get(k):
+        ph.error(field_messages[k])
+        continue
     affected = ", ".join(reverse_index.get(k, []))
     if affected:
         ph.caption(f"この入力が影響する指標: {affected}")
@@ -1312,7 +1374,17 @@ elif current_step == 3:
 else:
     st.caption("下部に標準賃率の結果と差異分析を表示します。")
 
-render_wizard_nav(current_step, location="main")
+should_block_next = bool(validation_messages) and current_step < total_steps - 1
+if should_block_next:
+    warning_lines = "\n".join(f"- {msg}" for msg in validation_messages)
+    st.warning(f"次へ進む前に以下をご確認ください:\n{warning_lines}")
+
+render_wizard_nav(
+    current_step,
+    location="main",
+    next_disabled=should_block_next,
+    next_disabled_help="必須項目を入力すると次のステップへ進めます。",
+)
 
 if current_step >= 4:
     c1, c2, c3, c4 = st.columns(4, gap="large")
@@ -2037,6 +2109,11 @@ if current_step >= 4:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    render_wizard_nav(current_step, location="bottom")
+render_wizard_nav(
+    current_step,
+    location="bottom",
+    next_disabled=should_block_next,
+    next_disabled_help="必須項目を入力すると次のステップへ進めます。",
+)
 
 sync_offline_cache()

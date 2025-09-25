@@ -66,6 +66,36 @@ def _format_fermi_value(value: Any) -> str:
     return f"{number:,.2f}"
 
 
+@st.cache_data(show_spinner=False)
+def _load_sample_bytes(path: str) -> bytes:
+    """Read bundled sample data and cache the result for repeated use."""
+
+    sample_path = Path(path)
+    if not sample_path.exists():
+        raise FileNotFoundError(f"サンプルファイルが見つかりません: {sample_path}")
+    return sample_path.read_bytes()
+
+
+def _load_sample_workbook(path: str) -> Optional[pd.ExcelFile]:
+    """Return an ExcelFile for the bundled sample with detailed errors."""
+
+    try:
+        sample_bytes = _load_sample_bytes(path)
+    except FileNotFoundError as exc:
+        st.error("サンプルデータが見つかりません。管理者にファイル配置を確認してください。")
+        st.caption(str(exc))
+        return None
+    except Exception as exc:  # pragma: no cover - unexpected IO issues
+        st.error("サンプルデータの読み込みで予期せぬエラーが発生しました。")
+        st.caption(str(exc))
+        return None
+
+    workbook = read_excel_safely(BytesIO(sample_bytes))
+    if workbook is None:
+        st.error("サンプルデータのExcel形式を解釈できませんでした。テンプレートを再取得してください。")
+    return workbook
+
+
 apply_user_theme()
 
 render_sidebar_nav(page_key="data")
@@ -142,12 +172,8 @@ def _redirect_to_dashboard() -> None:
         st.experimental_rerun()
 
 
-st.markdown(
-    """
-    #### データ取込オプション
-    1クリックで処理を開始できるカードを用意しました。最初に Excel フォーマットとサンプル値を確認してください。
-    """
-)
+st.markdown("#### 取り込み方法を選択")
+st.caption("Excel（R6.12形式）をアップロードするか、サンプル/直接編集で初期データを整備します。")
 
 st.session_state.setdefault("auto_redirect_dashboard", True)
 
@@ -161,7 +187,7 @@ with card_cols[0]:
         """
         <div class="data-intake-card">
             <h4>Excelファイルをアップロード</h4>
-            <p>最新の標賃・R6.12シートを取り込み、必要項目の自動チェックとテストを実行します。</p>
+            <p>最新の標賃・R6.12シートを取り込み、必須列と数値フォーマットをチェックします。</p>
             <div class="cta"></div>
         </div>
         """,
@@ -181,7 +207,7 @@ with card_cols[1]:
         """
         <div class="data-intake-card">
             <h4>サンプルデータで試す</h4>
-            <p>社内データが準備できていなくても、製造業想定のサンプルSKUでダッシュボードを体験できます。</p>
+            <p>同梱のサンプルSKUでダッシュボードと賃率ウィザードの流れを確認できます。</p>
             <div class="cta"></div>
         </div>
         """,
@@ -198,7 +224,7 @@ with card_cols[2]:
         """
         <div class="data-intake-card">
             <h4>アプリ内で直接編集</h4>
-            <p>アップロード後のSKUをそのままアプリ上で追加入力・修正し、Excelへ書き戻すことも可能です。</p>
+            <p>読み込んだSKUをブラウザ上で追加入力し、Excelに書き出して共有できます。</p>
             <div class="cta"></div>
         </div>
         """,
@@ -304,7 +330,7 @@ should_trigger_load = (
 if should_trigger_load:
     if file is None:
         st.info("サンプルデータを使用します。")
-        xls = read_excel_safely(default_path)
+        xls = _load_sample_workbook(default_path)
         st.session_state["using_sample_data"] = True
     else:
         xls = read_excel_safely(file)
@@ -317,10 +343,28 @@ if should_trigger_load:
     status_placeholder = st.empty()
     progress_bar = st.progress(0.05)
     status_placeholder.info("『標賃』を解析中…")
-    calc_params, sr_params, warn1 = parse_hyochin(xls)
+    try:
+        calc_params, sr_params, warn1 = parse_hyochin(xls)
+    except AttributeError as exc:
+        st.error("Excel解析でエラーが発生しました。テンプレートの形式をご確認ください。")
+        st.caption(str(exc))
+        st.stop()
+    except Exception as exc:  # pragma: no cover - unexpected parsing failures
+        st.error("『標賃』シートの解析に失敗しました。")
+        st.caption(str(exc))
+        st.stop()
     progress_bar.progress(0.35)
     status_placeholder.info("『R6.12』製品データを解析中…")
-    df_products, warn2 = parse_products(xls, sheet_name="R6.12")
+    try:
+        df_products, warn2 = parse_products(xls, sheet_name="R6.12")
+    except AttributeError as exc:
+        st.error("製品データの解析に失敗しました。Excelテンプレートを再確認してください。")
+        st.caption(str(exc))
+        st.stop()
+    except Exception as exc:  # pragma: no cover - unexpected parsing failures
+        st.error("製品データの読み込み中にエラーが発生しました。")
+        st.caption(str(exc))
+        st.stop()
     progress_bar.progress(0.7)
     for w in (warn1 + warn2):
         st.warning(w)
