@@ -1076,28 +1076,90 @@ def render_page_tutorial(page_key: str) -> None:
             st.caption("チュートリアルはサイドバーのボタンから再展開できます。")
 
 
-def render_stepper(current_step: int) -> None:
-    """Render a simple progress stepper for the import wizard.
+_FLOW_STEPS: List[Dict[str, Optional[str]]] = [
+    {"label": "ホーム", "description": "まずは全体像と導線を確認します。", "page": "app.py"},
+    {
+        "label": "データ取り込み",
+        "description": "Excelのアップロードやサンプル読込で土台データを準備します。",
+        "page": "pages/01_データ入力.py",
+    },
+    {
+        "label": "自動検証",
+        "description": "欠損やフォーマットエラーを自動チェックし、修正ポイントを洗い出します。",
+        "page": "pages/01_データ入力.py",
+    },
+    {
+        "label": "結果サマリ",
+        "description": "主要KPIカードと要約グラフで達成状況を把握します。",
+        "page": "pages/02_ダッシュボード.py",
+    },
+    {
+        "label": "ダッシュボード",
+        "description": "詳細チャートやアラートで意思決定の材料を揃えます。",
+        "page": "pages/02_ダッシュボード.py",
+    },
+    {
+        "label": "標準賃率計算",
+        "description": "シナリオ比較と感度分析で必要賃率を検証します。",
+        "page": "pages/03_標準賃率計算.py",
+    },
+]
 
-    Parameters
-    ----------
-    current_step: int
-        Zero-based index of the current step. The wizard steps are::
 
-            0: ホーム
-            1: 取り込み
-            2: 自動検証
-            3: 結果サマリ
-            4: ダッシュボード
-    """
-    steps = ["ホーム", "取り込み", "自動検証", "結果サマリ", "ダッシュボード"]
-    total = len(steps) - 1
-    progress = min(max(current_step, 0), total) / total if total else 0.0
-    st.progress(progress)
-    cols = st.columns(len(steps))
-    for idx, (col, label) in enumerate(zip(cols, steps)):
-        prefix = "🔵" if idx <= current_step else "⚪️"
-        col.markdown(f"{prefix} {label}")
+def render_stepper(current_step: int, *, show_cta: bool = True) -> None:
+    """Render a multi-step progress indicator for the guided flow."""
+
+    if not _FLOW_STEPS:
+        return
+
+    total_steps = len(_FLOW_STEPS)
+    clamped_index = max(0, min(int(current_step), total_steps - 1))
+    progress_ratio = (clamped_index + 1) / total_steps
+
+    st.progress(progress_ratio)
+    st.caption(
+        f"ステップ {clamped_index + 1} / {total_steps}: {_FLOW_STEPS[clamped_index]['label']}"
+    )
+
+    cols = st.columns(total_steps, gap="small")
+    for idx, (col, meta) in enumerate(zip(cols, _FLOW_STEPS)):
+        prefix = "✅" if idx < clamped_index else ("🟦" if idx == clamped_index else "⚪️")
+        label = meta["label"]
+        col.markdown(f"{prefix} **{idx + 1}. {label}**")
+        description = meta.get("description") or ""
+        if description:
+            col.caption(description)
+
+    if not show_cta:
+        return
+
+    prev_meta = _FLOW_STEPS[clamped_index - 1] if clamped_index > 0 else None
+    next_meta = _FLOW_STEPS[clamped_index + 1] if clamped_index < total_steps - 1 else None
+
+    cta_cols = st.columns(2, gap="large")
+    with cta_cols[0]:
+        if prev_meta and prev_meta.get("page"):
+            st.page_link(
+                str(prev_meta["page"]),
+                label=f"← {prev_meta['label']}に戻る",
+                icon="↩️",
+            )
+        else:
+            st.empty()
+    with cta_cols[1]:
+        if next_meta and next_meta.get("page"):
+            st.page_link(
+                str(next_meta["page"]),
+                label=f"{next_meta['label']}へ進む →",
+                icon="➡️",
+            )
+        else:
+            st.empty()
+
+    if next_meta:
+        st.caption(f"次のステップ: {next_meta['description']}")
+    else:
+        st.caption("すべてのステップが完了しました。標準賃率の結果を確認しましょう。")
 
 
 def render_sidebar_nav(*, page_key: Optional[str] = None) -> None:
