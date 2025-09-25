@@ -37,7 +37,7 @@ from components import (
 )
 from offline import restore_session_state_from_cache, sync_offline_cache
 import os
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -51,10 +51,10 @@ from openai import OpenAI
 PASTEL_PALETTE = [
     "#0B1F3B",
     "#1E88E5",
-    "#3D5A80",
-    "#5B8CC7",
-    "#7FB2E5",
-    "#A6C8F0",
+    "#5A6B7A",
+    "#69B36C",
+    "#FCA333",
+    "#EA615D",
 ]
 PASTEL_ACCENT = "#1E88E5"
 PASTEL_BG = "#F7F8FA"
@@ -2045,6 +2045,63 @@ def _render_behavior_dashboard(products: Optional[pd.DataFrame]) -> None:
 
     diagnostic_cards: List[Dict[str, Any]] = []
     kpi_cards: List[Dict[str, Any]] = []
+
+    def _render_metric(
+        column: Any,
+        label: str,
+        value: float,
+        value_formatter: Callable[[float], str],
+        *,
+        delta_value: Optional[float] = None,
+        delta_formatter: Optional[Callable[[float], str]] = None,
+        delta_color: str = "normal",
+    ) -> None:
+        if value is None or not np.isfinite(value):
+            column.metric(label, "-", "", delta_color=delta_color)
+            return
+        display_value = value_formatter(value)
+        delta_text = ""
+        if delta_formatter and delta_value is not None and np.isfinite(delta_value):
+            delta_text = delta_formatter(delta_value)
+        column.metric(label, display_value, delta_text, delta_color=delta_color)
+
+    summary_cols = st.columns([3, 1, 1, 1], gap="medium")
+    with summary_cols[0]:
+        st.markdown("#### KPIハイライト")
+        st.write(
+            "主要指標を一列で確認し、詳細カードとタブでドリルダウンできます。"
+        )
+        st.caption(
+            "期間・店舗・シナリオの選択は st.session_state に保持され、直近比較のΔに反映されます。"
+        )
+
+    _render_metric(
+        summary_cols[1],
+        "必要賃率達成率",
+        ach_rate,
+        lambda v: f"{v:.1f}%",
+        delta_value=ach_delta,
+        delta_formatter=lambda v: f"{v:+.1f}pt",
+        delta_color="normal",
+    )
+    _render_metric(
+        summary_cols[2],
+        "必要賃率との差",
+        gap_to_req,
+        lambda v: f"{v:+.2f} 円/分",
+        delta_value=gap_delta,
+        delta_formatter=lambda v: f"{v:+.2f}",
+        delta_color="inverse",
+    )
+    _render_metric(
+        summary_cols[3],
+        "平均付加価値/分",
+        avg_va,
+        lambda v: f"{v:.2f} 円/分",
+        delta_value=va_delta,
+        delta_formatter=lambda v: f"{v:+.2f}",
+        delta_color="normal",
+    )
 
     diagnostic_cards.append(
         {
