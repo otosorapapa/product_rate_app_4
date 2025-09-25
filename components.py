@@ -23,19 +23,18 @@ _ACCESSIBILITY_PREFS_FLAG = "_accessibility_prefs_loaded"
 
 _THEME_PALETTES: Dict[str, Dict[str, str]] = {
     "標準（ブルー）": {
-        "background": "#F7F8FA",
+        "background": "#F5F7FA",
         "surface": "#FFFFFF",
-        "text": "#1A1A1A",
-        "primary": "#0B1F3B",
-        "secondary": "#5A6B7A",
-        "accent": "#1E88E5",
-        "border": "#D1DAE5",
-        "muted": "#5A6B7A",
-        # 成功・警告・エラーカラーはトーンを20%白に寄せ、目に優しくしています。
-        "success": "#69B36C",  # lighten(#43A047, 20%)
-        "warning": "#FCA333",  # lighten(#FB8C00, 20%)
-        "danger": "#EA615D",  # lighten(#E53935, 20%)
-        "description": "濃紺と淡いグレーを基調とした知的で信頼感のある標準配色です。",
+        "text": "#1B2733",
+        "primary": "#003366",
+        "secondary": "#2F3B4A",
+        "accent": "#4A7AB7",
+        "border": "#D4DBE6",
+        "muted": "#607089",
+        "success": "#2F8F5B",
+        "warning": "#D89B3E",
+        "danger": "#C75C5C",
+        "description": "ネイビーとチャコールを基調にしたハイエンドコンサル風の落ち着いた配色です。",
     },
     "高コントラスト（濃紺×白）": {
         "background": "#0F172A",
@@ -89,6 +88,64 @@ _FONT_SCALE_OPTIONS: Dict[str, float] = {
     "特大": 1.3,
     "超特大": 1.45,
 }
+
+_PRIMARY_NAV_ITEMS: List[Dict[str, str]] = [
+    {"key": "home", "label": "ホーム", "icon": "🏠", "page": "app.py"},
+    {
+        "key": "data",
+        "label": "データ入力",
+        "icon": "📥",
+        "page": "pages/01_データ入力.py",
+    },
+    {
+        "key": "dashboard",
+        "label": "ダッシュボード",
+        "icon": "📊",
+        "page": "pages/02_ダッシュボード.py",
+    },
+    {
+        "key": "standard_rate",
+        "label": "標準賃率",
+        "icon": "🧮",
+        "page": "pages/03_標準賃率計算.py",
+    },
+    {
+        "key": "chat",
+        "label": "チャット/FAQ",
+        "icon": "💬",
+        "page": "pages/04_チャットサポート.py",
+    },
+]
+
+
+def _navigate_to_page(page_path: str, intent: str) -> None:
+    """Navigate to ``page_path`` with a query parameter fallback."""
+
+    try:
+        st.switch_page(page_path)
+    except Exception:
+        st.session_state["nav_intent"] = intent
+        st.experimental_set_query_params(next=intent)
+        st.experimental_rerun()
+
+
+def _sync_sidebar_visibility(is_open: bool) -> None:
+    """Synchronise the sidebar visibility class on the document ``body``."""
+
+    state_class = "open" if is_open else "closed"
+    st.markdown(
+        f"""
+        <script>
+        (function() {{
+            const rootDoc = (window.parent && window.parent.document) ? window.parent.document : document;
+            if (!rootDoc || !rootDoc.body) return;
+            rootDoc.body.classList.remove('nav-sidebar-open', 'nav-sidebar-closed');
+            rootDoc.body.classList.add('nav-sidebar-{state_class}');
+        }})();
+        </script>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _call_accessibility_js(expression: str, suffix: str) -> Optional[Any]:
@@ -609,11 +666,15 @@ def _build_theme_css(theme: Dict[str, str], font_scale: float) -> str:
     primary = theme.get("primary", theme.get("text", "#0B1F3B"))
     secondary = theme.get("secondary", theme.get("muted", "#5A6B7A"))
     accent = theme.get("accent", "#1E88E5")
-    font_stack = "'Inter', 'Source Sans 3', 'Hiragino Sans', 'Noto Sans JP', sans-serif"
-    numeric_font_stack = "'Roboto Mono', 'Inter', 'Source Sans 3', 'Hiragino Sans', 'Noto Sans JP', monospace"
+    font_stack = (
+        "'Noto Sans JP', 'Roboto', 'Hiragino Sans', 'Yu Gothic UI', 'Segoe UI', sans-serif"
+    )
+    numeric_font_stack = (
+        "'Roboto Mono', 'Roboto', 'Noto Sans JP', 'Hiragino Sans', monospace"
+    )
     return f"""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Sans+3:wght@400;600;700&family=Roboto+Mono:wght@500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@500;700&display=swap');
     :root {{
         --app-bg: {theme['background']};
         --app-surface: {theme['surface']};
@@ -651,20 +712,25 @@ def _build_theme_css(theme: Dict[str, str], font_scale: float) -> str:
         max-width: 1280px;
     }}
     h1 {{
-        font-size: 28px;
-        line-height: 1.3;
+        font-size: 30px;
+        line-height: 1.28;
+        color: var(--color-primary);
     }}
     h2 {{
-        font-size: 22px;
-        line-height: 1.35;
+        font-size: 24px;
+        line-height: 1.32;
+        color: var(--color-primary);
     }}
     h3 {{
-        font-size: 18px;
-        line-height: 1.4;
+        font-size: 19px;
+        line-height: 1.38;
+        color: var(--color-primary);
     }}
-    h4 {{ font-size: calc(var(--app-font-base) * 1.1); }}
-    h1, h2, h3, h4, h5, h6 {{
+    h4 {{
+        font-size: calc(var(--app-font-base) * 1.08);
         color: var(--app-text);
+    }}
+    h1, h2, h3, h4, h5, h6 {{
         font-weight: 700;
         letter-spacing: 0.01em;
         font-family: var(--font-sans);
@@ -681,6 +747,303 @@ def _build_theme_css(theme: Dict[str, str], font_scale: float) -> str:
     }}
     strong {{
         color: var(--app-text);
+    }}
+    .top-nav {{
+        position: sticky;
+        top: 0;
+        z-index: 50;
+        background: linear-gradient(90deg, rgba(0, 51, 102, 0.94), rgba(0, 51, 102, 0.88));
+        padding: calc(var(--spacing-unit) * 1.75) calc(var(--spacing-unit) * 2.25);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        box-shadow: 0 6px 12px rgba(5, 21, 40, 0.12);
+        backdrop-filter: blur(6px);
+    }}
+    .top-nav [data-testid="column"] > div {{
+        display: flex;
+        align-items: center;
+        height: 100%;
+    }}
+    .top-nav__brand {{
+        display: flex;
+        align-items: center;
+        gap: calc(var(--spacing-unit) * 1.5);
+        color: #F5F7FA;
+    }}
+    .top-nav__logo {{
+        width: 46px;
+        height: 46px;
+        border-radius: 12px;
+        background: #F5F7FA;
+        color: var(--color-primary);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        font-size: 1.05rem;
+        letter-spacing: 0.08em;
+    }}
+    .top-nav__brand-text {{
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+    }}
+    .top-nav__brand-title {{
+        font-size: 0.9rem;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        opacity: 0.75;
+    }}
+    .top-nav__brand-page {{
+        font-size: 1.12rem;
+        font-weight: 600;
+    }}
+    .top-nav__brand-sub {{
+        font-size: 0.85rem;
+        opacity: 0.68;
+    }}
+    .top-nav__links {{
+        display: flex;
+        justify-content: center;
+        width: 100%;
+        gap: calc(var(--spacing-unit) * 0.75);
+    }}
+    .top-nav__link {{
+        display: inline-flex;
+        flex: 1 1 auto;
+    }}
+    .top-nav__link .stButton > button {{
+        width: 100%;
+        background: transparent;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        color: #F5F7FA;
+        border-radius: 999px;
+        font-weight: 600;
+        font-size: 0.9rem;
+        padding: calc(var(--spacing-unit) * 0.75) calc(var(--spacing-unit) * 1.75);
+        transition: all 0.18s ease;
+        box-shadow: none;
+    }}
+    .top-nav__link .stButton > button:hover {{
+        background: rgba(255, 255, 255, 0.12);
+        transform: translateY(-1px);
+        box-shadow: 0 6px 16px rgba(5, 21, 40, 0.18);
+    }}
+    .top-nav__link.is-active .stButton > button {{
+        background: #F5F7FA;
+        color: var(--color-primary);
+        border-color: #F5F7FA;
+        box-shadow: 0 6px 16px rgba(5, 21, 40, 0.22);
+    }}
+    .top-nav__actions {{
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: calc(var(--spacing-unit) * 1.5);
+        width: 100%;
+    }}
+    .top-nav__user {{
+        display: inline-flex;
+        align-items: center;
+        gap: calc(var(--spacing-unit) * 1);
+        color: #F5F7FA;
+    }}
+    .top-nav__avatar {{
+        width: 38px;
+        height: 38px;
+        border-radius: 50%;
+        background: rgba(245, 247, 250, 0.18);
+        border: 1px solid rgba(245, 247, 250, 0.35);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+    }}
+    .top-nav__user-detail {{
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        font-size: 0.8rem;
+        line-height: 1.2;
+    }}
+    .top-nav__user-detail span:last-child {{
+        font-size: 0.92rem;
+        font-weight: 600;
+    }}
+    .top-nav__toggle .stButton > button {{
+        border-radius: 999px;
+        background: rgba(245, 247, 250, 0.12);
+        border: 1px solid rgba(245, 247, 250, 0.35);
+        color: #F5F7FA;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        padding: calc(var(--spacing-unit) * 0.75) calc(var(--spacing-unit) * 1.5);
+    }}
+    .top-nav__toggle .stButton > button:hover {{
+        background: rgba(245, 247, 250, 0.22);
+    }}
+    body.nav-sidebar-closed [data-testid="stSidebar"] {{
+        transform: translateX(-110%);
+        pointer-events: none;
+    }}
+    body.nav-sidebar-open [data-testid="stSidebar"] {{
+        transform: translateX(0);
+        pointer-events: all;
+        box-shadow: 0 18px 35px rgba(11, 31, 59, 0.16);
+    }}
+    body.nav-sidebar-open::after {{
+        content: "";
+        position: fixed;
+        inset: 0;
+        background: rgba(11, 31, 59, 0.35);
+        z-index: 40;
+    }}
+    @media (min-width: 1040px) {{
+        body.nav-sidebar-closed [data-testid="stSidebar"] {{
+            transform: translateX(0);
+            pointer-events: all;
+        }}
+        body.nav-sidebar-open::after {{
+            display: none;
+        }}
+    }}
+    @media (max-width: 960px) {{
+        .top-nav {{
+            padding: calc(var(--spacing-unit) * 1.5) calc(var(--spacing-unit) * 1.75);
+        }}
+        .top-nav [data-testid="column"] > div {{
+            justify-content: center;
+            margin-bottom: calc(var(--spacing-unit) * 1.25);
+        }}
+        .top-nav__links {{
+            flex-wrap: wrap;
+        }}
+        .top-nav__link {{
+            flex: 1 1 45%;
+        }}
+        .top-nav__actions {{
+            justify-content: center;
+        }}
+    }}
+    @media (max-width: 640px) {{
+        .top-nav__link {{
+            flex: 1 1 100%;
+        }}
+        .top-nav__actions {{
+            flex-direction: column;
+            align-items: stretch;
+            gap: calc(var(--spacing-unit) * 1);
+        }}
+        .top-nav__user {{
+            justify-content: center;
+        }}
+        .top-nav__toggle .stButton > button {{
+            width: 100%;
+        }}
+    }}
+    .hero-card {{
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: calc(var(--spacing-unit) * 3);
+        padding: calc(var(--spacing-unit) * 3);
+        background: var(--app-surface);
+        border-radius: 20px;
+        border: 1px solid rgba(0, 51, 102, 0.12);
+        box-shadow: 0 18px 38px rgba(5, 21, 40, 0.12);
+        margin-bottom: calc(var(--spacing-unit) * 3);
+    }}
+    .hero-card__badge {{
+        display: inline-flex;
+        align-items: center;
+        gap: calc(var(--spacing-unit) * 0.5);
+        background: rgba(0, 51, 102, 0.12);
+        color: var(--color-primary);
+        border-radius: 999px;
+        padding: calc(var(--spacing-unit) * 0.5) calc(var(--spacing-unit) * 1.25);
+        font-size: 0.8rem;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+    }}
+    .hero-card__lead {{
+        font-size: 1rem;
+        color: var(--app-text);
+        line-height: 1.75;
+        max-width: 520px;
+        margin-top: calc(var(--spacing-unit) * 1.25);
+    }}
+    .hero-card__meta {{
+        margin-top: calc(var(--spacing-unit) * 2);
+        display: flex;
+        gap: calc(var(--spacing-unit) * 1.5);
+        flex-wrap: wrap;
+    }}
+    .hero-chip {{
+        background: rgba(0, 51, 102, 0.08);
+        border-radius: 12px;
+        padding: calc(var(--spacing-unit) * 0.6) calc(var(--spacing-unit) * 1.25);
+        font-size: 0.82rem;
+        color: var(--color-primary);
+        font-weight: 600;
+    }}
+    .card-grid {{
+        display: grid;
+        gap: calc(var(--spacing-unit) * 2.5);
+        margin: calc(var(--spacing-unit) * 2.5) 0;
+    }}
+    .card-grid--three {{
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    }}
+    .content-card {{
+        background: var(--app-surface);
+        border-radius: 18px;
+        border: 1px solid rgba(0, 51, 102, 0.08);
+        box-shadow: 0 16px 32px rgba(5, 21, 40, 0.08);
+        padding: calc(var(--spacing-unit) * 2.5);
+        display: flex;
+        flex-direction: column;
+        gap: calc(var(--spacing-unit) * 1.5);
+        min-height: 210px;
+    }}
+    .content-card__title {{
+        font-size: 1.05rem;
+        font-weight: 600;
+        color: var(--color-primary);
+        margin: 0;
+    }}
+    .content-card__body {{
+        font-size: 0.95rem;
+        color: var(--app-text);
+        line-height: 1.7;
+    }}
+    .content-card__cta {{
+        margin-top: auto;
+    }}
+    .content-card__cta .stButton > button {{
+        width: 100%;
+    }}
+    .kpi-board {{
+        display: grid;
+        gap: calc(var(--spacing-unit) * 2);
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    }}
+    [data-testid="stMetric"] > div {{
+        background: var(--app-surface);
+        border-radius: 16px;
+        border: 1px solid rgba(0, 51, 102, 0.08);
+        box-shadow: 0 10px 26px rgba(5, 21, 40, 0.12);
+        padding: calc(var(--spacing-unit) * 1.75);
+        gap: calc(var(--spacing-unit) * 1.25);
+    }}
+    [data-testid="stMetric"] label {{
+        color: var(--app-muted) !important;
+        font-size: 0.86rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+    }}
+    [data-testid="stMetric"] span {{
+        font-size: 1.65rem !important;
+        color: var(--color-primary) !important;
+        font-family: var(--font-number);
     }}
     [data-testid="stHeader"] {{
         background-color: var(--app-surface);
@@ -756,28 +1119,28 @@ def _build_theme_css(theme: Dict[str, str], font_scale: float) -> str:
         outline-offset: 2px;
     }}
     [data-testid="stMetric"] {{
-        background: var(--app-surface);
-        border-radius: 10px;
-        padding: calc(var(--spacing-unit) * 1.5) calc(var(--spacing-unit) * 1.75);
-        box-shadow: 0 2px 4px rgba(11, 31, 59, 0.08);
-        border: 1px solid rgba(11, 31, 59, 0.08);
-        gap: calc(var(--spacing-unit) * 0.5);
-        align-items: flex-start;
+        background: transparent;
+        border: none;
+        padding: 0;
+        box-shadow: none;
+        align-items: stretch;
     }}
     [data-testid="stMetricLabel"] {{
-        color: var(--color-secondary) !important;
-        font-size: calc(var(--app-font-base) * 0.9);
-        letter-spacing: 0.02em;
+        color: var(--app-muted) !important;
+        font-size: 0.82rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
     }}
     [data-testid="stMetricValue"] {{
         font-family: var(--font-number);
         font-variant-numeric: tabular-nums;
         font-feature-settings: "tnum" 1, "lnum" 1;
         color: var(--color-primary) !important;
-        font-size: calc(var(--app-font-base) * 1.25);
+        font-size: 1.6rem;
+        line-height: 1.25;
     }}
     [data-testid="stMetricDelta"] {{
-        font-size: calc(var(--app-font-base) * 0.92);
+        font-size: 0.9rem;
         font-weight: 600;
     }}
     [data-testid="stAppViewContainer"] .stAlert {{
@@ -922,6 +1285,97 @@ def get_active_theme_palette() -> Dict[str, str]:
     _ensure_theme_state()
     theme_key = st.session_state.get("ui_theme", _DEFAULT_THEME_KEY)
     return _THEME_PALETTES.get(theme_key, _THEME_PALETTES[_DEFAULT_THEME_KEY]).copy()
+
+
+def render_top_navbar(
+    *,
+    page_key: str,
+    page_title: str,
+    subtitle: Optional[str] = None,
+    phase_label: Optional[str] = None,
+) -> None:
+    """Render a sticky top navigation bar with brand, links and user menu."""
+
+    _ensure_theme_state()
+    if not st.session_state.get("_theme_css_injected"):
+        apply_user_theme()
+
+    st.session_state.setdefault("_navbar_sidebar_open", False)
+
+    nav_container = st.container()
+    nav_container.markdown("<header class='top-nav'>", unsafe_allow_html=True)
+    brand_col, links_col, actions_col = nav_container.columns([0.34, 0.4, 0.26], gap="large")
+
+    with brand_col:
+        badge = phase_label or "Product Rate Intelligence"
+        subtitle_html = f"<span class='top-nav__brand-sub'>{html.escape(subtitle)}</span>" if subtitle else ""
+        brand_markup = f"""
+            <div class="top-nav__brand">
+                <div class="top-nav__logo">PR</div>
+                <div class="top-nav__brand-text">
+                    <span class="top-nav__brand-title">{html.escape(badge)}</span>
+                    <span class="top-nav__brand-page">{html.escape(page_title)}</span>
+                    {subtitle_html}
+                </div>
+            </div>
+        """
+        st.markdown(brand_markup, unsafe_allow_html=True)
+
+    with links_col:
+        st.markdown("<div class='top-nav__links'>", unsafe_allow_html=True)
+        link_columns = st.columns(len(_PRIMARY_NAV_ITEMS), gap="small")
+        for col, item in zip(link_columns, _PRIMARY_NAV_ITEMS):
+            active_class = " is-active" if item["key"] == page_key else ""
+            with col:
+                st.markdown(f"<div class='top-nav__link{active_class}'>", unsafe_allow_html=True)
+                button_label = f"{item['icon']} {item['label']}"
+                if st.button(
+                    button_label,
+                    key=f"top_nav_btn_{item['key']}",
+                    use_container_width=True,
+                ):
+                    _navigate_to_page(item["page"], item["key"])
+                st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with actions_col:
+        actions_col.markdown("<div class='top-nav__actions'>", unsafe_allow_html=True)
+        user_col, toggle_col = actions_col.columns([0.68, 0.32], gap="small")
+
+        user_profile: Dict[str, Any] = st.session_state.get("user_profile", {})  # type: ignore[assignment]
+        display_name = str(user_profile.get("display_name") or user_profile.get("name") or "ゲスト")
+        organisation = str(user_profile.get("company") or "Premium Workspace")
+        initials_source = "".join(ch for ch in display_name if ch.isalnum())
+        initials = (initials_source[:2] or "PR").upper()
+        user_markup = f"""
+            <div class="top-nav__user">
+                <span class="top-nav__avatar">{html.escape(initials)}</span>
+                <div class="top-nav__user-detail">
+                    <span>{html.escape(organisation)}</span>
+                    <span>{html.escape(display_name)}</span>
+                </div>
+            </div>
+        """
+        with user_col:
+            st.markdown(user_markup, unsafe_allow_html=True)
+
+        with toggle_col:
+            toggle_state = bool(st.session_state.get("_navbar_sidebar_open", False))
+            toggle_label = "✕ 閉じる" if toggle_state else "☰ メニュー"
+            st.markdown("<div class='top-nav__toggle'>", unsafe_allow_html=True)
+            if st.button(
+                toggle_label,
+                key="top_nav_toggle",
+                help="サイドバーの表示/非表示を切り替えます。",
+                use_container_width=True,
+            ):
+                st.session_state["_navbar_sidebar_open"] = not toggle_state
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        actions_col.markdown("</div>", unsafe_allow_html=True)
+
+    nav_container.markdown("</header>", unsafe_allow_html=True)
+    _sync_sidebar_visibility(bool(st.session_state.get("_navbar_sidebar_open", False)))
 
 
 def render_help_button(

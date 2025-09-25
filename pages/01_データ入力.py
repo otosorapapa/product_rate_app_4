@@ -43,6 +43,7 @@ from components import (
     render_page_tutorial,
     render_stepper,
     render_sidebar_nav,
+    render_top_navbar,
 )
 from offline import (
     mark_restore_notice_shown,
@@ -99,6 +100,13 @@ def _load_sample_workbook(path: str) -> Optional[pd.ExcelFile]:
 apply_user_theme()
 
 render_sidebar_nav(page_key="data")
+
+render_top_navbar(
+    page_key="data",
+    page_title="① データ入力 & 取り込み",
+    subtitle="データ品質チェックとテンプレ管理",
+    phase_label="Phase 3",
+)
 
 header_col, help_col = st.columns([0.78, 0.22], gap="small")
 with header_col:
