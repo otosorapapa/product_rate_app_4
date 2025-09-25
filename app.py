@@ -15,8 +15,10 @@ render_sidebar_nav(page_key="home")
 
 header_col, help_col = st.columns([0.82, 0.18], gap="small")
 with header_col:
-st.title("製品賃率ダッシュボード")
-st.caption("📊 Excel（標賃 / R6.12）から賃率KPIを自動計算し、SKU別の達成状況を可視化します。")
+    st.title("製品賃率ダッシュボード")
+    st.caption(
+        "📊 Excel（標賃 / R6.12）から賃率KPIを自動計算し、SKU別の達成状況を可視化します。"
+    )
 
 render_help_button("home", container=help_col)
 
