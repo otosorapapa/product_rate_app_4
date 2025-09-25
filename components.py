@@ -637,21 +637,31 @@ def _ensure_theme_state() -> None:
         if stored:
             theme_pref = stored.get("theme")
             font_pref = stored.get("font")
-            if isinstance(theme_pref, str) and theme_pref in _THEME_PALETTES:
+            if (
+                isinstance(theme_pref, str)
+                and theme_pref in _THEME_PALETTES
+                and "ui_theme" not in st.session_state
+            ):
                 st.session_state["ui_theme"] = theme_pref
-            if isinstance(font_pref, str) and font_pref in _FONT_SCALE_OPTIONS:
+            if (
+                isinstance(font_pref, str)
+                and font_pref in _FONT_SCALE_OPTIONS
+                and "ui_font_scale" not in st.session_state
+            ):
                 st.session_state["ui_font_scale"] = font_pref
         st.session_state[_ACCESSIBILITY_PREFS_FLAG] = True
 
-    theme_key = st.session_state.get("ui_theme", _DEFAULT_THEME_KEY)
+    theme_key = st.session_state.get("ui_theme")
     if theme_key not in _THEME_PALETTES:
         theme_key = _DEFAULT_THEME_KEY
-    st.session_state["ui_theme"] = theme_key
+        if "ui_theme" not in st.session_state:
+            st.session_state["ui_theme"] = theme_key
 
-    font_key = st.session_state.get("ui_font_scale", _DEFAULT_FONT_KEY)
+    font_key = st.session_state.get("ui_font_scale")
     if font_key not in _FONT_SCALE_OPTIONS:
         font_key = _DEFAULT_FONT_KEY
-    st.session_state["ui_font_scale"] = font_key
+        if "ui_font_scale" not in st.session_state:
+            st.session_state["ui_font_scale"] = font_key
 
 
 
