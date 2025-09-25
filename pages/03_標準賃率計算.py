@@ -29,6 +29,7 @@ from legal_updates import (
     build_compliance_alerts,
     fetch_labor_standards_updates,
 )
+from sample_data import ensure_sample_session_state
 
 WIZARD_STEPS: list[tuple[str, str]] = [
     ("従業員情報", "従業員区分ごとの人数と稼働係数を入力します。"),
@@ -878,6 +879,10 @@ render_top_navbar(
     subtitle="必要賃率と利益配分のシミュレーション",
     phase_label="Phase 3",
 )
+
+ensure_sample_session_state(notice_key="standard_rate_sample_notice")
+if st.session_state.pop("standard_rate_sample_notice", False):
+    st.info("製品データが未設定だったためサンプル data/sample.xlsx を自動読み込みしました。")
 
 if "df_products_raw" not in st.session_state or st.session_state.get("df_products_raw") is None:
     st.info("データがまだ取り込まれていません。『① データ入力』でExcelを読み込むかサンプルを使用してください。")
