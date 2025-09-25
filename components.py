@@ -26,18 +26,23 @@ _THEME_PALETTES: Dict[str, Dict[str, str]] = {
         "background": "#F7F8FA",
         "surface": "#FFFFFF",
         "text": "#1A1A1A",
+        "primary": "#0B1F3B",
+        "secondary": "#5A6B7A",
         "accent": "#1E88E5",
-        "border": "#CED6E0",
-        "muted": "#5C6672",
-        "success": "#3B8363",
-        "warning": "#B58A3C",
-        "danger": "#B75C5C",
+        "border": "#D1DAE5",
+        "muted": "#5A6B7A",
+        # 成功・警告・エラーカラーはトーンを20%白に寄せ、目に優しくしています。
+        "success": "#69B36C",  # lighten(#43A047, 20%)
+        "warning": "#FCA333",  # lighten(#FB8C00, 20%)
+        "danger": "#EA615D",  # lighten(#E53935, 20%)
         "description": "濃紺と淡いグレーを基調とした知的で信頼感のある標準配色です。",
     },
     "高コントラスト（濃紺×白）": {
         "background": "#0F172A",
         "surface": "#1F2937",
         "text": "#F9FAFB",
+        "primary": "#F9FAFB",
+        "secondary": "#E5E7EB",
         "accent": "#F97316",
         "border": "#4B5563",
         "muted": "#E5E7EB",
@@ -50,6 +55,8 @@ _THEME_PALETTES: Dict[str, Dict[str, str]] = {
         "background": "#F6F2EA",
         "surface": "#FFFBF5",
         "text": "#3F2F1E",
+        "primary": "#3F2F1E",
+        "secondary": "#7B6651",
         "accent": "#B8631B",
         "border": "#E3D5C3",
         "muted": "#7B6651",
@@ -62,6 +69,8 @@ _THEME_PALETTES: Dict[str, Dict[str, str]] = {
         "background": "#FFFFFF",
         "surface": "#F8FAFC",
         "text": "#101828",
+        "primary": "#101828",
+        "secondary": "#475569",
         "accent": "#B42318",
         "border": "#CBD5E1",
         "muted": "#475569",
@@ -157,11 +166,11 @@ def _inject_indicator_styles() -> None:
         }
         .indicator-card {
             background: var(--app-surface);
-            border-radius: 12px;
+            border-radius: 10px;
             padding: calc(var(--spacing-unit) * 2);
-            box-shadow: 0 2px 8px rgba(11, 31, 59, 0.12);
-            border: 1px solid rgba(11, 31, 59, 0.12);
-            color: #0B1F3B;
+            box-shadow: 0 2px 4px rgba(11, 31, 59, 0.08);
+            border: 1px solid rgba(11, 31, 59, 0.08);
+            color: var(--color-primary);
             min-height: 108px;
             display: flex;
             flex-direction: column;
@@ -172,16 +181,17 @@ def _inject_indicator_styles() -> None:
             font-size: calc(var(--app-font-base) * 0.95);
             margin: 0;
             font-weight: 600;
-            color: #1A2D4B;
+            color: var(--color-primary);
             letter-spacing: 0.01em;
         }
         .indicator-value {
             font-size: 1.8rem;
             font-weight: 700;
             line-height: 1.2;
-            color: #0B1F3B;
+            color: var(--color-primary);
             font-variant-numeric: tabular-nums;
             font-feature-settings: "tnum" 1, "lnum" 1;
+            font-family: var(--font-number);
             display: inline-flex;
             align-items: baseline;
             gap: calc(var(--spacing-unit) * 0.75);
@@ -189,7 +199,7 @@ def _inject_indicator_styles() -> None:
         .indicator-value sup {
             font-size: 0.58em;
             font-weight: 600;
-            color: rgba(11, 31, 59, 0.7);
+            color: var(--color-secondary);
             letter-spacing: 0.04em;
             transform: translateY(-0.15em);
         }
@@ -202,18 +212,18 @@ def _inject_indicator_styles() -> None:
             margin-top: calc(var(--spacing-unit) * 0.5);
         }
         .indicator-delta.neutral {
-            color: rgba(11, 31, 59, 0.6);
+            color: var(--color-secondary);
         }
         .indicator-delta.positive {
-            color: #3B8363;
+            color: var(--app-success);
         }
         .indicator-delta.negative {
-            color: #B75C5C;
+            color: var(--app-danger);
         }
         .indicator-note {
             font-size: calc(var(--app-font-base) * 0.8);
             line-height: 1.5;
-            color: rgba(11, 31, 59, 0.7);
+            color: var(--color-secondary);
         }
         </style>
         """,
@@ -596,14 +606,21 @@ def _build_theme_css(theme: Dict[str, str], font_scale: float) -> str:
     success = theme.get("success", "#3B8363")
     warning = theme.get("warning", "#B58A3C")
     danger = theme.get("danger", "#B75C5C")
+    primary = theme.get("primary", theme.get("text", "#0B1F3B"))
+    secondary = theme.get("secondary", theme.get("muted", "#5A6B7A"))
+    accent = theme.get("accent", "#1E88E5")
+    font_stack = "'Inter', 'Source Sans 3', 'Hiragino Sans', 'Noto Sans JP', sans-serif"
+    numeric_font_stack = "'Roboto Mono', 'Inter', 'Source Sans 3', 'Hiragino Sans', 'Noto Sans JP', monospace"
     return f"""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Sans+3:wght@400;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Sans+3:wght@400;600;700&family=Roboto+Mono:wght@500;600;700&display=swap');
     :root {{
         --app-bg: {theme['background']};
         --app-surface: {theme['surface']};
         --app-text: {theme['text']};
-        --app-accent: {theme['accent']};
+        --color-primary: {primary};
+        --color-secondary: {secondary};
+        --app-accent: {accent};
         --app-border: {theme['border']};
         --app-muted: {theme['muted']};
         --app-success: {success};
@@ -612,12 +629,14 @@ def _build_theme_css(theme: Dict[str, str], font_scale: float) -> str:
         --app-font-base: {base_font_px}px;
         --app-font-small: {small_font_px}px;
         --spacing-unit: 8px;
+        --font-sans: {font_stack};
+        --font-number: {numeric_font_stack};
     }}
     html, body, [data-testid="stAppViewContainer"] {{
         background-color: var(--app-bg);
         color: var(--app-text);
         font-size: var(--app-font-base);
-        font-family: 'Inter', 'Source Sans 3', 'Hiragino Sans', 'Noto Sans JP', sans-serif;
+        font-family: var(--font-sans);
     }}
     body {{
         line-height: 1.55;
@@ -631,19 +650,28 @@ def _build_theme_css(theme: Dict[str, str], font_scale: float) -> str:
         padding: calc(var(--spacing-unit) * 3) calc(var(--spacing-unit) * 3.5) calc(var(--spacing-unit) * 6);
         max-width: 1280px;
     }}
-    h1 {{ font-size: calc(var(--app-font-base) * 1.8); }}
-    h2 {{ font-size: calc(var(--app-font-base) * 1.5); }}
-    h3 {{ font-size: calc(var(--app-font-base) * 1.28); }}
+    h1 {{
+        font-size: 28px;
+        line-height: 1.3;
+    }}
+    h2 {{
+        font-size: 22px;
+        line-height: 1.35;
+    }}
+    h3 {{
+        font-size: 18px;
+        line-height: 1.4;
+    }}
     h4 {{ font-size: calc(var(--app-font-base) * 1.1); }}
     h1, h2, h3, h4, h5, h6 {{
         color: var(--app-text);
         font-weight: 700;
         letter-spacing: 0.01em;
-        font-family: 'Inter', 'Source Sans 3', 'Hiragino Sans', 'Noto Sans JP', sans-serif;
+        font-family: var(--font-sans);
     }}
     p, label, span, li, div, input, textarea {{
         color: var(--app-text);
-        font-family: 'Inter', 'Source Sans 3', 'Hiragino Sans', 'Noto Sans JP', sans-serif;
+        font-family: var(--font-sans);
     }}
     p {{
         line-height: 1.7;
@@ -690,13 +718,13 @@ def _build_theme_css(theme: Dict[str, str], font_scale: float) -> str:
         padding: calc(var(--spacing-unit) * 1) calc(var(--spacing-unit) * 2.5);
         font-weight: 600;
         font-size: calc(var(--app-font-base) * 0.95);
-        box-shadow: 0 2px 4px rgba(11, 31, 59, 0.18);
+        box-shadow: 0 2px 4px rgba(11, 31, 59, 0.12);
         transition: transform 0.2s ease, box-shadow 0.2s ease;
     }}
     .stButton > button:hover, .stDownloadButton > button:hover {{
         filter: brightness(0.98);
         transform: translateY(-1px);
-        box-shadow: 0 6px 12px rgba(11, 31, 59, 0.16);
+        box-shadow: 0 4px 12px rgba(11, 31, 59, 0.16);
     }}
     .stButton > button:focus-visible,
     .stDownloadButton > button:focus-visible {{
@@ -728,25 +756,29 @@ def _build_theme_css(theme: Dict[str, str], font_scale: float) -> str:
         outline-offset: 2px;
     }}
     [data-testid="stMetric"] {{
-        background-color: var(--app-surface);
-        border: 1px solid var(--app-border);
-        border-radius: 12px;
-        padding: calc(var(--spacing-unit) * 1.5);
-        box-shadow: 0 2px 6px rgba(11, 31, 59, 0.12);
-        backdrop-filter: blur(6px);
+        background: var(--app-surface);
+        border-radius: 10px;
+        padding: calc(var(--spacing-unit) * 1.5) calc(var(--spacing-unit) * 1.75);
+        box-shadow: 0 2px 4px rgba(11, 31, 59, 0.08);
+        border: 1px solid rgba(11, 31, 59, 0.08);
+        gap: calc(var(--spacing-unit) * 0.5);
+        align-items: flex-start;
     }}
-    [data-testid="stMetricLabel"],
-    [data-testid="stMetricValue"],
-    [data-testid="stMetricDelta"] {{
-        color: var(--app-text) !important;
-    }}
-    [data-testid="stMetricDelta"] span {{
-        font-weight: 600;
+    [data-testid="stMetricLabel"] {{
+        color: var(--color-secondary) !important;
         font-size: calc(var(--app-font-base) * 0.9);
+        letter-spacing: 0.02em;
     }}
     [data-testid="stMetricValue"] {{
+        font-family: var(--font-number);
         font-variant-numeric: tabular-nums;
         font-feature-settings: "tnum" 1, "lnum" 1;
+        color: var(--color-primary) !important;
+        font-size: calc(var(--app-font-base) * 1.25);
+    }}
+    [data-testid="stMetricDelta"] {{
+        font-size: calc(var(--app-font-base) * 0.92);
+        font-weight: 600;
     }}
     [data-testid="stAppViewContainer"] .stAlert {{
         border: 1px solid var(--app-border);
@@ -818,7 +850,7 @@ def _build_theme_css(theme: Dict[str, str], font_scale: float) -> str:
         color: var(--app-muted);
     }}
     .indicator-card {{
-        font-family: 'Inter', 'Source Sans 3', 'Noto Sans JP', sans-serif;
+        font-family: var(--font-sans);
     }}
     @media (max-width: 1080px) {{
         [data-testid="stSidebar"] {{
