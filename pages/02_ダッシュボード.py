@@ -115,35 +115,46 @@ COLOR_ACCENT = _palette["accent"]
 COLOR_ERROR = _palette.get("danger", "#B75C5C")
 COLOR_SUCCESS = _palette.get("success", "#3B8363")
 COLOR_SECONDARY = _palette.get("border", "#94A3B8")
+CASH_ALERT_THRESHOLD = 2_000_000.0
 
 STATUS_MESSAGES: Dict[str, Dict[str, Any]] = {
-    "no_data": {
-        "level": "warning",
-        "text": "該当期間のデータはありません。期間や店舗を変更して再度お試しください。",
-        "button": {"label": "別の期間を選ぶ", "action": "reset_period"},
-        "persist": True,
+    "initial": {
+        "level": "info",
+        "text": "条件を選択すると自動で更新されます。",
+        "persist": False,
     },
     "loading": {
         "level": "info",
         "text": "データを読み込んでいます…",
         "persist": True,
     },
-    "error": {
-        "level": "error",
-        "text": "データ取得に失敗しました。数分後に再度お試しください。",
-        "button": {"label": "再読み込み", "action": "rerun"},
+    "no_data": {
+        "level": "warning",
+        "text": "該当データはありません。期間やフィルタを変更して再検索してください。",
+        "button": {"label": "別の期間を選ぶ", "action": "reset_period"},
         "persist": True,
     },
     "empty_filter": {
         "level": "warning",
-        "text": "該当する項目がありません。フィルタ条件を緩めてください。",
+        "text": "該当データはありません。期間やフィルタを変更して再検索してください。",
         "button": {"label": "フィルタをリセット", "action": "reset_filters"},
+        "persist": True,
+    },
+    "error": {
+        "level": "error",
+        "text": "データ取得中にエラーが発生しました。ネットワーク環境を確認のうえ、再読み込みしてください。",
+        "button": {"label": "再読み込み", "action": "rerun"},
         "persist": True,
     },
     "success_export": {
         "level": "success",
-        "text": "ファイルをダウンロードしました。ご確認ください。",
+        "text": "CSVのダウンロードが完了しました。ファイルを確認してください。",
         "persist": False,
+    },
+    "warning_alert": {
+        "level": "warning",
+        "text": "資金残高が閾値を下回りました。詳細を確認してください。",
+        "persist": True,
     },
 }
 
@@ -180,9 +191,11 @@ def _handle_status_action(action: Optional[str], default_period: pd.Timestamp, d
         return
     if action == "reset_period":
         st.session_state["selected_period"] = default_period
+        _sync_period_state(default_period)
         _set_status(None)
     elif action == "reset_filters":
         st.session_state["selected_store"] = default_store
+        _sync_store_state(default_store)
         st.session_state["inventory_filter_mode"] = "不足のみ"
         _set_status(None)
     elif action == "rerun":
@@ -227,6 +240,39 @@ def _render_status_banner(default_period: pd.Timestamp, default_store: str) -> N
 
     if not info.get("persist", False):
         _set_status(None)
+
+
+def _period_to_range(period: Optional[pd.Timestamp]) -> Tuple[pd.Timestamp, pd.Timestamp]:
+    """Return a tuple of (start, end) dates for the selected monthly period."""
+
+    today = pd.Timestamp.today().normalize()
+    if period is None or pd.isna(period):
+        start = today.replace(day=1)
+        return start, today
+    base = pd.Timestamp(period).to_period("M").to_timestamp()
+    end = base + pd.offsets.MonthEnd(0)
+    if end > today:
+        end = today
+    return base, end
+
+
+def _sync_store_state(value: str) -> None:
+    """Persist the latest store selection for reuse across tabs."""
+
+    st.session_state["store"] = value
+
+
+def _sync_period_state(value: pd.Timestamp) -> None:
+    """Persist the latest period selection and its range."""
+
+    start, end = _period_to_range(value)
+    st.session_state["period"] = (start, end)
+
+
+def _focus_cash_tab() -> None:
+    """Switch the segmented control to the cash tab when alert is clicked."""
+
+    st.session_state["behavior_active_tab"] = "資金"
 
 
 def _safe_to_numeric(series: pd.Series) -> pd.Series:
@@ -1388,32 +1434,36 @@ def _render_sales_tab(
             "売上": st.column_config.NumberColumn("売上", format="¥%,d"),
             "粗利": st.column_config.NumberColumn("粗利", format="¥%,d"),
         }
+        period_str = selected_period.strftime("%Y-%m")
+        store_label = selected_store if selected_store != _DEFAULT_STORE_OPTION else "全店舗"
+        csv_name = f"売上_{period_str}_{store_label}.csv"
+        pdf_name = f"売上_{period_str}_{store_label}.pdf"
+        csv_bytes = detail.to_csv(index=False).encode("utf-8-sig")
+        header_cols = st.columns([0.7, 0.15, 0.15])
+        header_cols[0].markdown("##### 売上明細")
+        if header_cols[1].download_button(
+            "📥 CSV出力",
+            data=csv_bytes,
+            file_name=csv_name,
+            mime="text/csv",
+            key=f"sales_detail_csv_{period_str}_{store_label}",
+            help="現在の期間・店舗条件で売上明細をダウンロードします。",
+        ):
+            _set_status("success_export")
+        if header_cols[2].download_button(
+            "📄 PDF出力",
+            data=_build_pdf_from_dataframe(detail, title=f"{period_label} 売上明細 ({store_label})"),
+            file_name=pdf_name,
+            mime="application/pdf",
+            key=f"sales_detail_pdf_{period_str}_{store_label}",
+        ):
+            _set_status("success_export")
         st.dataframe(
             detail,
             use_container_width=True,
             hide_index=True,
             column_config=detail_column_config,
         )
-        period_str = selected_period.strftime("%Y-%m")
-        store_label = selected_store if selected_store != _DEFAULT_STORE_OPTION else "全店舗"
-        csv_name = f"売上_{period_str}_{store_label}.csv"
-        pdf_name = f"売上_{period_str}_{store_label}.pdf"
-        csv_bytes = detail.to_csv(index=False).encode("utf-8-sig")
-        col_csv, col_pdf = st.columns(2)
-        if col_csv.download_button(
-            "CSVダウンロード",
-            data=csv_bytes,
-            file_name=csv_name,
-            mime="text/csv",
-        ):
-            _set_status("success_export")
-        if col_pdf.download_button(
-            "PDFダウンロード",
-            data=_build_pdf_from_dataframe(detail, title=f"{period_label} 売上明細 ({store_label})"),
-            file_name=pdf_name,
-            mime="application/pdf",
-        ):
-            _set_status("success_export")
 
 
 def _render_profit_tab(
@@ -1566,12 +1616,28 @@ def _render_profit_tab(
         "売上": st.column_config.NumberColumn("売上", format="¥%,d"),
         "粗利": st.column_config.NumberColumn("粗利", format="¥%,d"),
     }
-    st.dataframe(
-        detail,
-        use_container_width=True,
-        hide_index=True,
-        column_config=profit_detail_config,
-    )
+    period_str = selected_period.strftime("%Y-%m")
+    store_label = selected_store if selected_store != _DEFAULT_STORE_OPTION else "全店舗"
+    csv_name = f"損益_{period_str}_{store_label}.csv"
+    csv_bytes = detail.to_csv(index=False).encode("utf-8-sig")
+    with st.expander("詳細テーブル（PL）", expanded=False):
+        header_cols = st.columns([0.78, 0.22])
+        header_cols[0].markdown("##### 損益明細")
+        if header_cols[1].download_button(
+            "📥 CSV出力",
+            data=csv_bytes,
+            file_name=csv_name,
+            mime="text/csv",
+            key=f"profit_detail_csv_{period_str}_{store_label}",
+            help="現在の期間・店舗条件でPL明細をダウンロードします。",
+        ):
+            _set_status("success_export")
+        st.dataframe(
+            detail,
+            use_container_width=True,
+            hide_index=True,
+            column_config=profit_detail_config,
+        )
 
 
 def _render_inventory_tab(
@@ -1647,9 +1713,9 @@ def _render_inventory_tab(
 
     top_shortages = filtered.sort_values("shortage", ascending=False).head(3)
     for _, row in top_shortages.iterrows():
-        st.info(
+        st.error(
             f"{row['product_name']}｜残数 {int(row['on_hand'])}個｜安全在庫 {int(row['safety_stock'])}個"
-            f"｜不足 {int(max(row['shortage'], 0))}個"
+            f"｜不足 {int(max(row['shortage'], 0))}個",
         )
 
     table = filtered[[
@@ -1679,31 +1745,52 @@ def _render_inventory_tab(
     table["在庫数"] = table["在庫数"].astype(int)
     table["安全在庫"] = table["安全在庫"].astype(int)
     table["残日数"] = table["残日数"].map(lambda v: f"{float(v):.1f}" if not pd.isna(v) else "-")
-
-    column_config = {
-        "発注": st.column_config.LinkColumn("発注", help="在庫担当へのメールリンクを開きます。"),
-    }
-    st.data_editor(
-        table,
-        hide_index=True,
-        use_container_width=True,
-        column_config=column_config,
-    )
-
     store_label = selected_store if selected_store != _DEFAULT_STORE_OPTION else "全店舗"
     csv_name = f"在庫_{store_label}.csv"
     pdf_name = f"在庫_{store_label}.pdf"
     csv_bytes = table.to_csv(index=False).encode("utf-8-sig")
-    col_csv, col_pdf = st.columns(2)
-    if col_csv.download_button("CSVダウンロード", data=csv_bytes, file_name=csv_name, mime="text/csv"):
+    header_cols = st.columns([0.7, 0.15, 0.15])
+    header_cols[0].markdown("##### 在庫一覧")
+    if header_cols[1].download_button(
+        "📥 CSV出力",
+        data=csv_bytes,
+        file_name=csv_name,
+        mime="text/csv",
+        key=f"inventory_csv_{store_label}",
+        help="不足フラグを含めた在庫一覧をダウンロードします。",
+    ):
         _set_status("success_export")
-    if col_pdf.download_button(
-        "PDFダウンロード",
+    if header_cols[2].download_button(
+        "📄 PDF出力",
         data=_build_pdf_from_dataframe(table, title=f"在庫一覧 ({store_label})"),
         file_name=pdf_name,
         mime="application/pdf",
+        key=f"inventory_pdf_{store_label}",
     ):
         _set_status("success_export")
+
+    filtered_reset = filtered.reset_index(drop=True)
+    table_display = table.copy().reset_index(drop=True)
+    table_display["発注"] = table_display["発注"].fillna("")
+    flag_series = filtered_reset["shortage_flag"].reset_index(drop=True)
+
+    def _style_shortage(row: pd.Series) -> List[str]:
+        highlight = "background-color: #FDECEC" if flag_series.iloc[row.name] else ""
+        return [highlight] * len(row)
+
+    format_map = {
+        "在庫数": "{:,}",
+        "安全在庫": "{:,}",
+        "不足数": "{:,}",
+    }
+    styled = (
+        table_display.style.format(format_map)
+        .hide(axis="index")
+        .format({"発注": lambda url: f'<a href="{url}">メール作成</a>' if url else ""}, escape="html")
+        .apply(_style_shortage, axis=1)
+    )
+
+    st.dataframe(styled, use_container_width=True)
 
 
 def _render_cash_tab(
@@ -1789,6 +1876,31 @@ def _render_cash_tab(
             "memo": "メモ",
         }
     )
+    period_str = selected_period.strftime("%Y-%m")
+    store_label = selected_store if selected_store != _DEFAULT_STORE_OPTION else "全店舗"
+    csv_name = f"資金_{period_str}_{store_label}.csv"
+    pdf_name = f"資金_{period_str}_{store_label}.pdf"
+    csv_bytes = display.to_csv(index=False).encode("utf-8-sig")
+    header_cols = st.columns([0.7, 0.15, 0.15])
+    header_cols[0].markdown("##### 入出金明細")
+    if header_cols[1].download_button(
+        "📥 CSV出力",
+        data=csv_bytes,
+        file_name=csv_name,
+        mime="text/csv",
+        key=f"cash_csv_{period_str}_{store_label}",
+        help="現在の期間・店舗条件で入出金明細をダウンロードします。",
+    ):
+        _set_status("success_export")
+    if header_cols[2].download_button(
+        "📄 PDF出力",
+        data=_build_pdf_from_dataframe(display, title=f"入出金明細 {period_str} ({store_label})"),
+        file_name=pdf_name,
+        mime="application/pdf",
+        key=f"cash_pdf_{period_str}_{store_label}",
+    ):
+        _set_status("success_export")
+
     cash_column_config = {
         "金額": st.column_config.NumberColumn("金額", format="¥%,d"),
     }
@@ -1798,22 +1910,6 @@ def _render_cash_tab(
         hide_index=True,
         column_config=cash_column_config,
     )
-
-    period_str = selected_period.strftime("%Y-%m")
-    store_label = selected_store if selected_store != _DEFAULT_STORE_OPTION else "全店舗"
-    csv_name = f"資金_{period_str}_{store_label}.csv"
-    pdf_name = f"資金_{period_str}_{store_label}.pdf"
-    csv_bytes = display.to_csv(index=False).encode("utf-8-sig")
-    col_csv, col_pdf = st.columns(2)
-    if col_csv.download_button("CSVダウンロード", data=csv_bytes, file_name=csv_name, mime="text/csv"):
-        _set_status("success_export")
-    if col_pdf.download_button(
-        "PDFダウンロード",
-        data=_build_pdf_from_dataframe(display, title=f"入出金明細 {period_str} ({store_label})"),
-        file_name=pdf_name,
-        mime="application/pdf",
-    ):
-        _set_status("success_export")
 
 
 def _render_value_added_tab(
@@ -1896,7 +1992,13 @@ def _render_value_added_tab(
 def _render_behavior_dashboard(products: Optional[pd.DataFrame]) -> None:
     """Render the behaviour-first dashboard view introduced in Step4."""
 
-    context = _prepare_behavior_context(products)
+    try:
+        with st.spinner("データを読み込んでいます…"):
+            context = _prepare_behavior_context(products)
+    except Exception:
+        _set_status("error")
+        st.error(STATUS_MESSAGES["error"]["text"])
+        st.stop()
     default_period: pd.Timestamp = context["default_period"]
     default_store: str = context["default_store"]
 
@@ -1920,11 +2022,13 @@ def _render_behavior_dashboard(products: Optional[pd.DataFrame]) -> None:
         or st.session_state["selected_period"] not in context["period_options"]
     ):
         st.session_state["selected_period"] = default_period
+    _sync_period_state(st.session_state["selected_period"])
     if (
         "selected_store" not in st.session_state
         or st.session_state["selected_store"] not in context["store_options"]
     ):
         st.session_state["selected_store"] = default_store
+    _sync_store_state(st.session_state["selected_store"])
 
     _render_status_banner(default_period, default_store)
 
@@ -1938,12 +2042,14 @@ def _render_behavior_dashboard(products: Optional[pd.DataFrame]) -> None:
             key="selected_period",
             help="前回選択した期間を記憶し、再訪時に自動で復元します。",
         )
+        _sync_period_state(selected_period)
         selected_store = st.selectbox(
             "店舗",
             options=context["store_options"],
             key="selected_store",
             help="全店舗または特定店舗を切り替えて分析します。",
         )
+        _sync_store_state(selected_store)
         if scenario_keys:
             selected_scenario = st.selectbox(
                 "シナリオ",
@@ -2274,13 +2380,43 @@ def _render_behavior_dashboard(products: Optional[pd.DataFrame]) -> None:
         },
     ]
 
+    if np.isfinite(cash_balance) and cash_balance < CASH_ALERT_THRESHOLD:
+        warning_box = st.warning(STATUS_MESSAGES["warning_alert"]["text"])
+        warning_box.button("資金タブを開く", key="cash_alert_btn", on_click=_focus_cash_tab)
+
     with selector_left:
         st.markdown("#### KGIダッシュボード")
         render_indicator_cards(primary_cards)
         st.caption("上位指標→トレンド→明細の順で重要情報を確認できます。")
 
-    tabs = st.tabs(["売上", "粗利", "在庫", "資金"])
-    with tabs[0]:
+    tab_options = ["売上", "粗利", "在庫", "資金"]
+    st.session_state.setdefault("behavior_active_tab", tab_options[0])
+    segmented = getattr(st, "segmented_control", None)
+    if segmented is not None:
+        active_tab = segmented(
+            "主要タスク",
+            options=tab_options,
+            key="behavior_active_tab",
+            help="主要タブをワンクリックで切り替えます。",
+        )
+    else:
+        try:
+            active_tab = st.radio(
+                "主要タスク",
+                options=tab_options,
+                key="behavior_active_tab",
+                horizontal=True,
+                help="主要タブをワンクリックで切り替えます。",
+            )
+        except TypeError:
+            active_tab = st.radio(
+                "主要タスク",
+                options=tab_options,
+                key="behavior_active_tab",
+                help="主要タブをワンクリックで切り替えます。",
+            )
+
+    if active_tab == "売上":
         _render_sales_tab(
             context,
             selected_period=selected_period,
@@ -2289,7 +2425,7 @@ def _render_behavior_dashboard(products: Optional[pd.DataFrame]) -> None:
             current_period_df=current_period_df,
             previous_period_df=previous_period_df,
         )
-    with tabs[1]:
+    elif active_tab == "粗利":
         _render_profit_tab(
             context,
             selected_period=selected_period,
@@ -2298,7 +2434,7 @@ def _render_behavior_dashboard(products: Optional[pd.DataFrame]) -> None:
             current_period_df=current_period_df,
             previous_period_df=previous_period_df,
         )
-    with tabs[2]:
+    elif active_tab == "在庫":
         control_fn = getattr(st, "segmented_control", st.radio)
         mode = control_fn(
             "表示対象",
@@ -2320,7 +2456,7 @@ def _render_behavior_dashboard(products: Optional[pd.DataFrame]) -> None:
             threshold_days=threshold,
             mode=mode,
         )
-    with tabs[3]:
+    else:
         _render_cash_tab(
             context,
             selected_period=selected_period,
