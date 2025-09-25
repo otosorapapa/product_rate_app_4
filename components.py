@@ -1,6 +1,7 @@
 import html
 import json
 import math
+import textwrap
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
@@ -361,16 +362,18 @@ def render_indicator_cards(cards: List[Dict[str, Any]]) -> None:
         title_html = html.escape(str(title))
 
         card_blocks.append(
-            f"""
-            <div class='indicator-card'>
-                <div>
-                    <h4>{title_html}</h4>
-                    <div class='indicator-value'>{value_html}</div>
-                    <div class='indicator-delta {trend_class}'>{delta_html}</div>
+            textwrap.dedent(
+                f"""
+                <div class='indicator-card'>
+                    <div>
+                        <h4>{title_html}</h4>
+                        <div class='indicator-value'>{value_html}</div>
+                        <div class='indicator-delta {trend_class}'>{delta_html}</div>
+                    </div>
+                    <div class='indicator-note'>{note_html}</div>
                 </div>
-                <div class='indicator-note'>{note_html}</div>
-            </div>
-            """
+                """
+            ).strip()
         )
 
     card_blocks.append("</div>")
