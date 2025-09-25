@@ -855,22 +855,23 @@ st.markdown(
     <style>
     .sr-section {
         background: var(--app-surface);
-        border-radius: 20px;
-        border: 1px solid var(--app-border);
-        padding: 1.4rem 1.6rem;
-        margin-bottom: 1.5rem;
-        box-shadow: 0 20px 36px rgba(0, 0, 0, 0.08);
+        border-radius: 12px;
+        border: 1px solid rgba(11, 31, 59, 0.12);
+        padding: calc(var(--spacing-unit) * 2);
+        margin-bottom: calc(var(--spacing-unit) * 2.5);
+        box-shadow: 0 2px 10px rgba(11, 31, 59, 0.12);
         color: var(--app-text);
     }
     .sr-section h4 {
         color: var(--app-text);
         font-weight: 700;
-        margin-bottom: 0.3rem;
+        margin-bottom: calc(var(--spacing-unit));
     }
     .sr-section p,
     .sr-section .sr-helper {
-        color: var(--app-muted);
-        margin-bottom: 0.6rem;
+        color: rgba(11, 31, 59, 0.7);
+        margin-bottom: calc(var(--spacing-unit) * 1.2);
+        line-height: 1.6;
     }
     .sr-section div[data-baseweb="input"] > input,
     .sr-section textarea,
@@ -879,8 +880,8 @@ st.markdown(
     .sr-section input[type="text"] {
         background-color: var(--app-surface) !important;
         color: var(--app-text) !important;
-        border-radius: 12px;
-        border: 1px solid var(--app-border);
+        border-radius: 10px;
+        border: 1px solid rgba(11, 31, 59, 0.16);
         font-weight: 600;
     }
     .sr-section label {
@@ -888,10 +889,10 @@ st.markdown(
         font-weight: 600 !important;
     }
     .sr-section .stSlider > div > div > div[data-testid="stTickBar"] {
-        background-color: var(--app-border);
+        background-color: rgba(11, 31, 59, 0.15);
     }
     .sr-section .stSlider > div > div > div > div {
-        background: linear-gradient(90deg, var(--app-accent), rgba(255, 255, 255, 0));
+        background: linear-gradient(90deg, rgba(30, 136, 229, 0.95), rgba(30, 136, 229, 0.1));
     }
     .sr-section .stSlider [data-testid="stThumbValue"] > div {
         color: var(--app-text) !important;
@@ -899,20 +900,20 @@ st.markdown(
     }
     .sr-stepper {
         display: flex;
-        gap: 0.8rem;
+        gap: calc(var(--spacing-unit) * 1.5);
         flex-wrap: wrap;
-        margin: 0.8rem 0 1.2rem;
+        margin: calc(var(--spacing-unit) * 1.5) 0;
     }
     .sr-step {
-        flex: 1 1 180px;
+        flex: 1 1 200px;
         background: var(--app-surface);
-        border-radius: 16px;
-        border: 1px solid var(--app-border);
-        padding: 0.8rem 1rem;
+        border-radius: 12px;
+        border: 1px solid rgba(11, 31, 59, 0.12);
+        padding: calc(var(--spacing-unit) * 1.5);
         display: flex;
         align-items: center;
-        gap: 0.8rem;
-        box-shadow: 0 12px 24px rgba(0, 0, 0, 0.08);
+        gap: calc(var(--spacing-unit) * 1);
+        box-shadow: 0 2px 8px rgba(11, 31, 59, 0.12);
         transition: border 0.2s ease, box-shadow 0.2s ease;
     }
     .sr-step-index {
@@ -923,52 +924,51 @@ st.markdown(
         align-items: center;
         justify-content: center;
         font-weight: 700;
-        color: var(--app-surface);
-        background: var(--app-border);
+        color: #FFFFFF;
+        background: rgba(30, 136, 229, 0.45);
     }
     .sr-step.is-active {
         border-color: var(--app-accent);
-        box-shadow: 0 16px 32px rgba(0, 0, 0, 0.15);
+        box-shadow: 0 6px 16px rgba(30, 136, 229, 0.2);
     }
     .sr-step.is-active .sr-step-index {
         background: var(--app-accent);
     }
     .sr-step.is-complete .sr-step-index {
-        background: var(--app-accent);
-        opacity: 0.55;
+        background: rgba(30, 136, 229, 0.65);
     }
     .sr-step-body strong {
         color: var(--app-text);
         display: block;
-        margin-bottom: 0.2rem;
+        margin-bottom: calc(var(--spacing-unit) * 0.5);
     }
     .sr-step-desc {
         margin: 0;
-        color: var(--app-muted);
+        color: rgba(11, 31, 59, 0.65);
         font-size: var(--app-font-small);
     }
     .sr-nav-buttons {
         display: flex;
-        gap: 0.6rem;
-        margin: 0.8rem 0 1.4rem;
+        gap: calc(var(--spacing-unit) * 1);
+        margin: calc(var(--spacing-unit) * 1.5) 0;
     }
     .sr-nav-buttons > div {
         flex: 1;
     }
     .sr-nav-buttons > div button {
         width: 100%;
-        border-radius: 999px;
+        border-radius: 12px;
         font-weight: 600;
     }
     div[data-testid="metric-container"] {
         background: var(--app-surface);
-        border-radius: 20px;
-        border: 1px solid var(--app-border);
-        padding: 1.2rem;
-        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 18px 32px rgba(0, 0, 0, 0.08);
+        border-radius: 12px;
+        border: 1px solid rgba(11, 31, 59, 0.12);
+        padding: calc(var(--spacing-unit) * 1.5);
+        box-shadow: 0 2px 8px rgba(11, 31, 59, 0.12);
     }
     div[data-testid="metric-container"] label {
-        color: var(--app-muted) !important;
+        color: rgba(11, 31, 59, 0.65) !important;
         font-weight: 600;
     }
     div[data-testid="metric-container"] > div:nth-child(2) {
@@ -976,24 +976,24 @@ st.markdown(
         font-weight: 700;
     }
     .sr-metric-caption {
-        margin-top: -0.6rem;
+        margin-top: calc(var(--spacing-unit) * -0.75);
         font-size: var(--app-font-small);
-        color: var(--app-muted);
+        color: rgba(11, 31, 59, 0.6);
     }
     .sr-highlight {
         background: var(--app-surface);
-        border-radius: 16px;
-        border: 1px solid var(--app-border);
-        padding: 0.8rem 1rem;
+        border-radius: 12px;
+        border: 1px solid rgba(11, 31, 59, 0.12);
+        padding: calc(var(--spacing-unit) * 1.5);
         color: var(--app-text);
-        box-shadow: 0 12px 28px rgba(0, 0, 0, 0.08);
+        box-shadow: 0 2px 8px rgba(11, 31, 59, 0.12);
     }
     .sr-highlight strong {
         color: var(--app-accent);
     }
     @media (max-width: 860px) {
         .sr-section {
-            padding: 1.1rem 1.2rem;
+            padding: calc(var(--spacing-unit) * 1.5);
         }
         .sr-stepper {
             flex-direction: column;
@@ -1017,7 +1017,7 @@ st.markdown(
             flex: 1 1 100% !important;
         }
         div[data-testid="metric-container"] {
-            margin-bottom: 0.8rem;
+            margin-bottom: calc(var(--spacing-unit) * 1);
         }
     }
     </style>
