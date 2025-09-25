@@ -17,6 +17,7 @@ from components import (
     render_onboarding,
     render_page_tutorial,
     render_sidebar_nav,
+    render_top_navbar,
 )
 from offline import restore_session_state_from_cache, sync_offline_cache
 from standard_rate_core import DEFAULT_PARAMS, compute_rates, sanitize_params
@@ -804,6 +805,13 @@ apply_user_theme()
 
 restore_session_state_from_cache()
 render_sidebar_nav(page_key="chat")
+
+render_top_navbar(
+    page_key="chat",
+    page_title="④ チャット / FAQ",
+    subtitle="AIガイドとナレッジベースへのアクセス",
+    phase_label="Phase 3",
+)
 
 header_col, help_col = st.columns([0.78, 0.22], gap="small")
 with header_col:

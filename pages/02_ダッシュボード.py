@@ -33,6 +33,7 @@ from components import (
     render_page_tutorial,
     render_stepper,
     render_sidebar_nav,
+    render_top_navbar,
     render_indicator_cards,
 )
 from offline import restore_session_state_from_cache, sync_offline_cache
@@ -49,15 +50,15 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from openai import OpenAI
 
 PASTEL_PALETTE = [
-    "#0B1F3B",
-    "#1E88E5",
-    "#5A6B7A",
-    "#69B36C",
-    "#FCA333",
-    "#EA615D",
+    "#003366",
+    "#4A7AB7",
+    "#2F3B4A",
+    "#2F8F5B",
+    "#D89B3E",
+    "#C75C5C",
 ]
-PASTEL_ACCENT = "#1E88E5"
-PASTEL_BG = "#F7F8FA"
+PASTEL_ACCENT = "#4A7AB7"
+PASTEL_BG = "#F5F7FA"
 _PASTEL_THEME_NAME = "pastel_mck"
 _PASTEL_THEME_CONFIG = {
     "config": {
@@ -3422,6 +3423,13 @@ def _generate_dashboard_comment(
         return f"AIコメント生成に失敗しました: {exc}"
 
 render_sidebar_nav(page_key="dashboard")
+
+render_top_navbar(
+    page_key="dashboard",
+    page_title="② ダッシュボード",
+    subtitle="経営判断に直結するKPIレポート",
+    phase_label="Phase 3",
+)
 
 header_col, help_col = st.columns([0.76, 0.24], gap="small")
 with header_col:

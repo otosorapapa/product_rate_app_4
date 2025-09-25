@@ -17,6 +17,7 @@ from components import (
     render_page_tutorial,
     render_stepper,
     render_sidebar_nav,
+    render_top_navbar,
 )
 import os
 from io import BytesIO
@@ -870,6 +871,13 @@ apply_user_theme()
 restore_session_state_from_cache()
 
 render_sidebar_nav(page_key="standard_rate")
+
+render_top_navbar(
+    page_key="standard_rate",
+    page_title="③ 標準賃率 計算/感度分析",
+    subtitle="必要賃率と利益配分のシミュレーション",
+    phase_label="Phase 3",
+)
 
 if "df_products_raw" not in st.session_state or st.session_state.get("df_products_raw") is None:
     st.info("データがまだ取り込まれていません。『① データ入力』でExcelを読み込むかサンプルを使用してください。")
