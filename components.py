@@ -23,13 +23,16 @@ _ACCESSIBILITY_PREFS_FLAG = "_accessibility_prefs_loaded"
 
 _THEME_PALETTES: Dict[str, Dict[str, str]] = {
     "標準（ブルー）": {
-        "background": "#F4F7FA",
+        "background": "#F7F8FA",
         "surface": "#FFFFFF",
-        "text": "#1F2A44",
-        "accent": "#2F6776",
-        "border": "#CBD7E3",
-        "muted": "#5F6B8A",
-        "description": "やわらかなブルー基調の標準配色です。初めての方にも見やすく設計しています。",
+        "text": "#1A1A1A",
+        "accent": "#1E88E5",
+        "border": "#CED6E0",
+        "muted": "#5C6672",
+        "success": "#3B8363",
+        "warning": "#B58A3C",
+        "danger": "#B75C5C",
+        "description": "濃紺と淡いグレーを基調とした知的で信頼感のある標準配色です。",
     },
     "高コントラスト（濃紺×白）": {
         "background": "#0F172A",
@@ -38,6 +41,9 @@ _THEME_PALETTES: Dict[str, Dict[str, str]] = {
         "accent": "#F97316",
         "border": "#4B5563",
         "muted": "#E5E7EB",
+        "success": "#43C29E",
+        "warning": "#F97316",
+        "danger": "#F97316",
         "description": "暗い背景と明るい文字でコントラストを最大化し、小さな文字も読みやすくします。",
     },
     "あたたかいセピア": {
@@ -47,6 +53,9 @@ _THEME_PALETTES: Dict[str, Dict[str, str]] = {
         "accent": "#B8631B",
         "border": "#E3D5C3",
         "muted": "#7B6651",
+        "success": "#8A6E45",
+        "warning": "#B8631B",
+        "danger": "#B8631B",
         "description": "目に優しい生成りカラー。長時間の閲覧でも疲れにくい落ち着いた配色です。",
     },
     "くっきり（白×黒）": {
@@ -56,6 +65,9 @@ _THEME_PALETTES: Dict[str, Dict[str, str]] = {
         "accent": "#B42318",
         "border": "#CBD5E1",
         "muted": "#475569",
+        "success": "#3B8363",
+        "warning": "#B58A3C",
+        "danger": "#B75C5C",
         "description": "白地に濃色のテキストでコントラストを最大化したテーマです。印刷物と同じ感覚で閲覧できます。",
     },
 }
@@ -131,69 +143,100 @@ def _inject_indicator_styles() -> None:
         <style>
         .indicator-grid {
             display: grid;
-            gap: 0.75rem;
+            gap: calc(var(--spacing-unit) * 2);
         }
         @media (min-width: 1280px) {
             .indicator-grid {
-                grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+                grid-template-columns: repeat(3, minmax(280px, 1fr));
             }
         }
         @media (max-width: 1279px) {
             .indicator-grid {
-                grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+                grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
             }
         }
         .indicator-card {
-            background: linear-gradient(145deg, #0F1C2E, #1C2F4A);
-            border-radius: 16px;
-            padding: 1.1rem 1.25rem;
-            box-shadow: 0 12px 24px rgba(19, 41, 75, 0.18);
-            border: 1px solid rgba(99, 122, 168, 0.25);
-            color: #F4F7FB;
-            min-height: 150px;
+            background: var(--app-surface);
+            border-radius: 12px;
+            padding: calc(var(--spacing-unit) * 2);
+            box-shadow: 0 2px 8px rgba(11, 31, 59, 0.12);
+            border: 1px solid rgba(11, 31, 59, 0.12);
+            color: #0B1F3B;
+            min-height: 108px;
             display: flex;
             flex-direction: column;
             justify-content: space-between;
+            gap: calc(var(--spacing-unit) * 1.5);
         }
         .indicator-card h4 {
-            font-size: 0.95rem;
-            margin: 0 0 0.35rem 0;
+            font-size: calc(var(--app-font-base) * 0.95);
+            margin: 0;
             font-weight: 600;
-            letter-spacing: 0.02em;
+            color: #1A2D4B;
+            letter-spacing: 0.01em;
         }
         .indicator-value {
-            font-size: 1.9rem;
+            font-size: 1.8rem;
             font-weight: 700;
-            margin-bottom: 0.15rem;
             line-height: 1.2;
+            color: #0B1F3B;
+            font-variant-numeric: tabular-nums;
+            font-feature-settings: "tnum" 1, "lnum" 1;
+            display: inline-flex;
+            align-items: baseline;
+            gap: calc(var(--spacing-unit) * 0.75);
+        }
+        .indicator-value sup {
+            font-size: 0.58em;
+            font-weight: 600;
+            color: rgba(11, 31, 59, 0.7);
+            letter-spacing: 0.04em;
+            transform: translateY(-0.15em);
         }
         .indicator-delta {
-            font-size: 0.9rem;
+            font-size: calc(var(--app-font-base) * 0.9);
             font-weight: 600;
             display: inline-flex;
             align-items: center;
-            gap: 0.3rem;
-            margin-bottom: 0.3rem;
+            gap: calc(var(--spacing-unit) * 0.75);
+            margin-top: calc(var(--spacing-unit) * 0.5);
         }
         .indicator-delta.neutral {
-            color: #C1CEDF;
+            color: rgba(11, 31, 59, 0.6);
         }
         .indicator-delta.positive {
-            color: #67A28F;
+            color: #3B8363;
         }
         .indicator-delta.negative {
-            color: #D97A7A;
+            color: #B75C5C;
         }
         .indicator-note {
-            font-size: 0.78rem;
-            line-height: 1.4;
-            color: rgba(233, 242, 255, 0.82);
+            font-size: calc(var(--app-font-base) * 0.8);
+            line-height: 1.5;
+            color: rgba(11, 31, 59, 0.7);
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
     st.session_state[_INDICATOR_STYLE_KEY] = True
+
+
+def _format_indicator_value(value: Any) -> str:
+    """Return HTML-safe indicator value with optional unit superscript."""
+
+    if value is None:
+        return html.escape("-")
+    text = str(value).strip()
+    if not text:
+        return html.escape("-")
+    if "/" in text and not text.startswith("http"):
+        base, unit = text.split("/", 1)
+        base = html.escape(base.strip())
+        unit = html.escape(unit.strip())
+        if unit:
+            return f"{base}<sup>/{unit}</sup>"
+    return html.escape(text)
 
 
 def render_indicator_cards(cards: List[Dict[str, Any]]) -> None:
@@ -245,23 +288,22 @@ def render_indicator_cards(cards: List[Dict[str, Any]]) -> None:
         else:
             trend_class = card.get("trend_class", "neutral")
 
+        value_html = _format_indicator_value(value)
+        delta_html = html.escape(str(delta_text))
+        note_html = html.escape(str(note))
+        title_html = html.escape(str(title))
+
         card_blocks.append(
-            """
+            f"""
             <div class='indicator-card'>
                 <div>
-                    <h4>{title}</h4>
-                    <div class='indicator-value'>{value}</div>
-                    <div class='indicator-delta {trend_class}'>{delta_text}</div>
+                    <h4>{title_html}</h4>
+                    <div class='indicator-value'>{value_html}</div>
+                    <div class='indicator-delta {trend_class}'>{delta_html}</div>
                 </div>
-                <div class='indicator-note'>{note}</div>
+                <div class='indicator-note'>{note_html}</div>
             </div>
-            """.format(
-                title=html.escape(str(title)),
-                value=html.escape(str(value)),
-                delta_text=html.escape(str(delta_text)),
-                note=html.escape(str(note)),
-                trend_class=trend_class,
-            )
+            """
         )
 
     card_blocks.append("</div>")
@@ -545,13 +587,18 @@ def _ensure_theme_state() -> None:
     st.session_state["ui_font_scale"] = font_key
 
 
+
 def _build_theme_css(theme: Dict[str, str], font_scale: float) -> str:
     """Return CSS for the selected theme and font scale."""
 
-    base_font_px = round(16 * font_scale, 2)
+    base_font_px = round(15 * font_scale, 2)
     small_font_px = round(base_font_px * 0.85, 2)
+    success = theme.get("success", "#3B8363")
+    warning = theme.get("warning", "#B58A3C")
+    danger = theme.get("danger", "#B75C5C")
     return f"""
     <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Sans+3:wght@400;600;700&display=swap');
     :root {{
         --app-bg: {theme['background']};
         --app-surface: {theme['surface']};
@@ -559,25 +606,52 @@ def _build_theme_css(theme: Dict[str, str], font_scale: float) -> str:
         --app-accent: {theme['accent']};
         --app-border: {theme['border']};
         --app-muted: {theme['muted']};
+        --app-success: {success};
+        --app-warning: {warning};
+        --app-danger: {danger};
         --app-font-base: {base_font_px}px;
         --app-font-small: {small_font_px}px;
+        --spacing-unit: 8px;
     }}
     html, body, [data-testid="stAppViewContainer"] {{
         background-color: var(--app-bg);
         color: var(--app-text);
         font-size: var(--app-font-base);
+        font-family: 'Inter', 'Source Sans 3', 'Hiragino Sans', 'Noto Sans JP', sans-serif;
     }}
     body {{
-        line-height: 1.6;
+        line-height: 1.55;
+        -webkit-font-smoothing: antialiased;
+        font-feature-settings: "palt" 1, "liga" 1;
     }}
-    h1 {{ font-size: calc(var(--app-font-base) * 1.7); }}
-    h2 {{ font-size: calc(var(--app-font-base) * 1.45); }}
-    h3 {{ font-size: calc(var(--app-font-base) * 1.25); }}
+    .stApp {{
+        background-color: var(--app-bg);
+    }}
+    [data-testid="block-container"] {{
+        padding: calc(var(--spacing-unit) * 3) calc(var(--spacing-unit) * 3.5) calc(var(--spacing-unit) * 6);
+        max-width: 1280px;
+    }}
+    h1 {{ font-size: calc(var(--app-font-base) * 1.8); }}
+    h2 {{ font-size: calc(var(--app-font-base) * 1.5); }}
+    h3 {{ font-size: calc(var(--app-font-base) * 1.28); }}
+    h4 {{ font-size: calc(var(--app-font-base) * 1.1); }}
     h1, h2, h3, h4, h5, h6 {{
         color: var(--app-text);
         font-weight: 700;
+        letter-spacing: 0.01em;
+        font-family: 'Inter', 'Source Sans 3', 'Hiragino Sans', 'Noto Sans JP', sans-serif;
     }}
-    p, label, span, li {{
+    p, label, span, li, div, input, textarea {{
+        color: var(--app-text);
+        font-family: 'Inter', 'Source Sans 3', 'Hiragino Sans', 'Noto Sans JP', sans-serif;
+    }}
+    p {{
+        line-height: 1.7;
+    }}
+    ul, ol {{
+        padding-left: calc(var(--spacing-unit) * 2.5);
+    }}
+    strong {{
         color: var(--app-text);
     }}
     [data-testid="stHeader"] {{
@@ -587,6 +661,7 @@ def _build_theme_css(theme: Dict[str, str], font_scale: float) -> str:
     [data-testid="stSidebar"] {{
         background-color: var(--app-surface);
         border-right: 1px solid var(--app-border);
+        padding: calc(var(--spacing-unit) * 2) calc(var(--spacing-unit) * 2.5);
     }}
     [data-testid="stSidebar"] * {{
         color: var(--app-text);
@@ -599,39 +674,66 @@ def _build_theme_css(theme: Dict[str, str], font_scale: float) -> str:
         color: var(--app-muted) !important;
         font-size: var(--app-font-small) !important;
     }}
+    [data-testid="stAppViewContainer"] a {{
+        color: var(--app-accent);
+        font-weight: 600;
+        text-decoration: none;
+    }}
+    [data-testid="stAppViewContainer"] a:hover {{
+        text-decoration: underline;
+    }}
     .stButton > button, .stDownloadButton > button {{
         background: var(--app-accent);
         color: #FFFFFF;
-        border: none;
-        border-radius: 999px;
-        padding: 0.65rem 1.4rem;
+        border: 1px solid transparent;
+        border-radius: 12px;
+        padding: calc(var(--spacing-unit) * 1) calc(var(--spacing-unit) * 2.5);
         font-weight: 600;
         font-size: calc(var(--app-font-base) * 0.95);
+        box-shadow: 0 2px 4px rgba(11, 31, 59, 0.18);
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
     }}
     .stButton > button:hover, .stDownloadButton > button:hover {{
-        filter: brightness(1.05);
+        filter: brightness(0.98);
+        transform: translateY(-1px);
+        box-shadow: 0 6px 12px rgba(11, 31, 59, 0.16);
     }}
     .stButton > button:focus-visible,
     .stDownloadButton > button:focus-visible {{
-        outline: 3px solid var(--app-accent);
+        outline: 3px solid rgba(30, 136, 229, 0.35);
         outline-offset: 2px;
+    }}
+    .stButton > button[data-testid="baseButton-secondary"],
+    .stDownloadButton > button[data-testid="baseButton-secondary"] {{
+        background: var(--app-surface);
+        color: var(--app-accent);
+        border: 1px solid rgba(30, 136, 229, 0.4);
+        box-shadow: none;
+    }}
+    .stButton > button[data-testid="baseButton-secondary"]:hover,
+    .stDownloadButton > button[data-testid="baseButton-secondary"]:hover {{
+        background: rgba(30, 136, 229, 0.08);
+        box-shadow: none;
     }}
     input, textarea, select {{
         background-color: var(--app-surface);
         color: var(--app-text);
         border: 1px solid var(--app-border);
-        border-radius: 8px;
+        border-radius: 10px;
+        padding: calc(var(--spacing-unit) * 1);
+        font-size: 0.95em;
     }}
     input:focus-visible, textarea:focus-visible, select:focus-visible {{
-        outline: 2px solid var(--app-accent);
-        outline-offset: 1px;
+        outline: 2px solid rgba(30, 136, 229, 0.45);
+        outline-offset: 2px;
     }}
     [data-testid="stMetric"] {{
         background-color: var(--app-surface);
         border: 1px solid var(--app-border);
-        border-radius: 18px;
-        padding: 0.8rem 1rem;
-        box-shadow: 0 8px 18px rgba(0, 0, 0, 0.08);
+        border-radius: 12px;
+        padding: calc(var(--spacing-unit) * 1.5);
+        box-shadow: 0 2px 6px rgba(11, 31, 59, 0.12);
+        backdrop-filter: blur(6px);
     }}
     [data-testid="stMetricLabel"],
     [data-testid="stMetricValue"],
@@ -640,15 +742,24 @@ def _build_theme_css(theme: Dict[str, str], font_scale: float) -> str:
     }}
     [data-testid="stMetricDelta"] span {{
         font-weight: 600;
+        font-size: calc(var(--app-font-base) * 0.9);
+    }}
+    [data-testid="stMetricValue"] {{
+        font-variant-numeric: tabular-nums;
+        font-feature-settings: "tnum" 1, "lnum" 1;
     }}
     [data-testid="stAppViewContainer"] .stAlert {{
         border: 1px solid var(--app-border);
+        border-radius: 12px;
         background-color: var(--app-surface);
         color: var(--app-text);
+        box-shadow: 0 2px 6px rgba(11, 31, 59, 0.08);
     }}
     [data-testid="stExpander"] > div {{
         border: 1px solid var(--app-border);
+        border-radius: 12px;
         background-color: var(--app-surface);
+        box-shadow: 0 2px 4px rgba(11, 31, 59, 0.08);
     }}
     [data-testid="stExpander"] [data-testid="stMarkdownContainer"] p {{
         color: var(--app-text);
@@ -660,10 +771,54 @@ def _build_theme_css(theme: Dict[str, str], font_scale: float) -> str:
     [data-testid="stTable"] td {{
         color: var(--app-text);
         border-color: var(--app-border);
+        font-size: 0.95em;
     }}
-    [data-testid="stAppViewContainer"] a {{
-        color: var(--app-accent);
+    [data-testid="stTable"] tbody tr:nth-child(odd),
+    [data-testid="dataframe-container"] table tbody tr:nth-child(odd) {{
+        background-color: rgba(11, 31, 59, 0.035);
+    }}
+    [data-testid="stTable"] thead tr,
+    [data-testid="dataframe-container"] table thead tr {{
+        background-color: rgba(11, 31, 59, 0.08);
+    }}
+    .stTabs [data-baseweb="tab-list"] {{
+        gap: calc(var(--spacing-unit) * 1.5);
+    }}
+    .stTabs [data-baseweb="tab"] {{
+        background: transparent;
+        border-radius: 0;
+        padding: calc(var(--spacing-unit) * 1) calc(var(--spacing-unit) * 1.5);
         font-weight: 600;
+        color: var(--app-muted);
+    }}
+    .stTabs [data-baseweb="tab"]:hover {{
+        background: rgba(30, 136, 229, 0.08);
+        color: var(--app-text);
+    }}
+    .stTabs [data-baseweb="tab"][aria-selected="true"] {{
+        color: var(--app-accent);
+        border-bottom: 3px solid var(--app-accent);
+        background: transparent;
+    }}
+    .stTabs [data-baseweb="tab"] > div {{
+        font-size: 0.95em;
+    }}
+    div[data-testid="stHorizontalBlock"] {{
+        gap: calc(var(--spacing-unit) * 2);
+    }}
+    .stSelectbox [data-baseweb="select"] {{
+        border-radius: 10px;
+    }}
+    div[data-baseweb="tag"] {{
+        border-radius: 999px !important;
+    }}
+    .stMarkdown blockquote {{
+        border-left: 4px solid var(--app-accent);
+        padding-left: calc(var(--spacing-unit) * 1.5);
+        color: var(--app-muted);
+    }}
+    .indicator-card {{
+        font-family: 'Inter', 'Source Sans 3', 'Noto Sans JP', sans-serif;
     }}
     @media (max-width: 1080px) {{
         [data-testid="stSidebar"] {{
@@ -673,6 +828,9 @@ def _build_theme_css(theme: Dict[str, str], font_scale: float) -> str:
         .stDownloadButton > button {{
             width: 100%;
         }}
+        [data-testid="block-container"] {{
+            padding: calc(var(--spacing-unit) * 2.5) calc(var(--spacing-unit) * 2.25);
+        }}
     }}
     @media (max-width: 860px) {{
         [data-testid="stAppViewContainer"] {{
@@ -680,11 +838,11 @@ def _build_theme_css(theme: Dict[str, str], font_scale: float) -> str:
             padding-right: 0;
         }}
         [data-testid="block-container"] {{
-            padding: 0.6rem 0.9rem 3rem;
+            padding: calc(var(--spacing-unit) * 2) calc(var(--spacing-unit) * 1.5) calc(var(--spacing-unit) * 5);
         }}
         [data-testid="stHorizontalBlock"] {{
             flex-wrap: wrap;
-            gap: 0.75rem;
+            gap: calc(var(--spacing-unit) * 1.5);
         }}
         [data-testid="stHorizontalBlock"] > div {{
             flex: 1 1 100% !important;
@@ -697,25 +855,21 @@ def _build_theme_css(theme: Dict[str, str], font_scale: float) -> str:
         [data-testid="stMetric"] {{
             width: 100%;
         }}
-        .stTabs [data-baseweb="tab-list"] {{
-            flex-wrap: wrap;
-        }}
     }}
     @media (max-width: 520px) {{
         h1 {{
-            font-size: calc(var(--app-font-base) * 1.4);
+            font-size: calc(var(--app-font-base) * 1.5);
         }}
         h2 {{
-            font-size: calc(var(--app-font-base) * 1.25);
+            font-size: calc(var(--app-font-base) * 1.3);
         }}
         .stButton > button,
         .stDownloadButton > button {{
-            padding: 0.55rem 1.0rem;
+            padding: calc(var(--spacing-unit) * 0.75) calc(var(--spacing-unit) * 2);
         }}
     }}
     </style>
     """
-
 
 def apply_user_theme() -> None:
     """Apply the active theme and font scale to the current Streamlit page."""

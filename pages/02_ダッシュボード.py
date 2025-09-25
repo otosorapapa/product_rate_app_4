@@ -49,15 +49,15 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from openai import OpenAI
 
 PASTEL_PALETTE = [
-    "#2F6776",
-    "#79A3B1",
-    "#F2C57C",
-    "#9BC0A0",
-    "#DDA0BC",
-    "#AEC9EB",
+    "#0B1F3B",
+    "#1E88E5",
+    "#3D5A80",
+    "#5B8CC7",
+    "#7FB2E5",
+    "#A6C8F0",
 ]
-PASTEL_ACCENT = "#2F6776"
-PASTEL_BG = "#F4F7FA"
+PASTEL_ACCENT = "#1E88E5"
+PASTEL_BG = "#F7F8FA"
 _PASTEL_THEME_NAME = "pastel_mck"
 _PASTEL_THEME_CONFIG = {
     "config": {
@@ -112,8 +112,9 @@ def _register_pastel_theme() -> None:
 _register_pastel_theme()
 
 COLOR_ACCENT = _palette["accent"]
-COLOR_ERROR = "#D94A64"
-COLOR_SECONDARY = _palette.get("border", "#9CA3AF")
+COLOR_ERROR = _palette.get("danger", "#B75C5C")
+COLOR_SUCCESS = _palette.get("success", "#3B8363")
+COLOR_SECONDARY = _palette.get("border", "#94A3B8")
 
 STATUS_MESSAGES: Dict[str, Dict[str, Any]] = {
     "no_data": {
@@ -691,7 +692,7 @@ def _build_gross_profit_trend_chart(trend_df: pd.DataFrame) -> alt.Chart:
 
     color_scale = alt.Scale(
         domain=["売上高", "原価", "粗利"],
-        range=[COLOR_ACCENT, COLOR_ERROR, COLOR_SECONDARY],
+        range=[COLOR_ACCENT, COLOR_ERROR, COLOR_SUCCESS],
     )
 
     base = alt.Chart(long_df).encode(
@@ -886,7 +887,7 @@ def _build_inventory_category_chart(category_summary: pd.DataFrame) -> alt.Chart
     status_order = ["不足", "適正", "過剰"]
     color_scale = alt.Scale(
         domain=status_order,
-        range=[COLOR_ERROR, COLOR_ACCENT, "#9BC0A0"],
+        range=[COLOR_ERROR, COLOR_ACCENT, COLOR_SUCCESS],
     )
 
     chart = (
@@ -2216,19 +2217,21 @@ st.markdown(
     }
     [data-testid="stMetric"] {
         background-color: var(--app-surface);
-        border-radius: 18px;
-        border: 1px solid var(--app-border);
-        padding: 12px 16px;
-        box-shadow: 0 6px 12px rgba(0, 0, 0, 0.06);
+        border-radius: 12px;
+        border: 1px solid rgba(11, 31, 59, 0.15);
+        padding: calc(var(--spacing-unit) * 1.5);
+        box-shadow: 0 2px 6px rgba(11, 31, 59, 0.12);
         color: var(--app-text);
     }
     [data-testid="stMetricDelta"] span {
         font-weight: 600;
+        color: var(--app-accent);
     }
     .metric-badge {
         text-align: right;
         color: var(--app-accent);
         font-weight: 600;
+        letter-spacing: 0.02em;
     }
     </style>
     """,

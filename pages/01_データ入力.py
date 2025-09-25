@@ -86,7 +86,7 @@ if not st.session_state.get("_data_cards_style"):
         <style>
         .data-intake-grid {
             display: grid;
-            gap: 1rem;
+            gap: calc(var(--spacing-unit) * 2);
         }
         @media (min-width: 1200px) {
             .data-intake-grid {
@@ -99,22 +99,30 @@ if not st.session_state.get("_data_cards_style"):
             }
         }
         .data-intake-card {
-            border-radius: 18px;
-            border: 1px solid rgba(49, 80, 120, 0.2);
-            padding: 1.1rem 1.25rem 1.25rem;
-            background: linear-gradient(150deg, #F6F8FB 0%, #EDF2F9 100%);
-            box-shadow: 0 12px 24px rgba(15, 28, 46, 0.08);
+            border-radius: 12px;
+            border: 1px solid rgba(11, 31, 59, 0.12);
+            padding: calc(var(--spacing-unit) * 2);
+            background: var(--app-surface);
+            box-shadow: 0 2px 8px rgba(11, 31, 59, 0.12);
+            display: flex;
+            flex-direction: column;
+            gap: calc(var(--spacing-unit) * 1.5);
+            min-height: 180px;
         }
         .data-intake-card h4 {
-            margin-bottom: 0.45rem;
+            margin: 0;
+            color: #0B1F3B;
+            font-weight: 600;
+            letter-spacing: 0.01em;
         }
         .data-intake-card p {
-            font-size: 0.9rem;
-            color: #334155;
-            min-height: 3.8rem;
+            font-size: 0.95rem;
+            color: rgba(11, 31, 59, 0.78);
+            line-height: 1.6;
+            min-height: 3.6rem;
         }
         .data-intake-card .cta {
-            margin-top: 0.8rem;
+            margin-top: auto;
         }
         </style>
         """,
