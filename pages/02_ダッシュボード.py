@@ -3469,8 +3469,26 @@ def reset_quick_params() -> None:
     st.session_state["quick_material"] = 0
     st.session_state["active_simulation"] = "ベース"
 
-if "df_products_raw" not in st.session_state or st.session_state["df_products_raw"] is None or len(st.session_state["df_products_raw"]) == 0:
-    st.info("先に『① データ入力 & 取り込み』でデータを準備してください。")
+if (
+    "df_products_raw" not in st.session_state
+    or st.session_state["df_products_raw"] is None
+    or len(st.session_state["df_products_raw"]) == 0
+):
+    empty_state = st.container()
+    empty_state.warning(
+        "データがまだ読み込まれていません。左のナビゲーションから取り込みステップへ戻ってください。"
+    )
+    link_cols = empty_state.columns(2, gap="large")
+    with link_cols[0]:
+        st.page_link(
+            "pages/01_データ入力.py",
+            label="📥 ① データ入力へ戻る",
+        )
+    with link_cols[1]:
+        st.page_link("app.py", label="🏠 ホームを見る")
+    empty_state.caption(
+        "データをアップロードすると自動検証が実行され、完了後にダッシュボードへ遷移します。"
+    )
     st.stop()
 
 df_raw_all = st.session_state["df_products_raw"]

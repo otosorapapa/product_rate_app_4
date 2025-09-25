@@ -904,7 +904,7 @@ render_help_button("standard_rate", container=help_col)
 
 render_onboarding()
 render_page_tutorial("standard_rate")
-render_stepper(4)
+render_stepper(5)
 
 st.markdown(
     """
