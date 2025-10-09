@@ -527,6 +527,7 @@ if should_trigger_load:
     error_issue_keys: Set[Tuple[str, str]] = set()
     warning_issue_keys: Set[Tuple[str, str]] = set()
     highlight_html: Optional[str] = None
+    focus_validation = st.session_state.pop("focus_validation", False)
 
     if not detail_df.empty:
         for _, issue in detail_df.iterrows():
